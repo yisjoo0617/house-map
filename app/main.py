@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .motion import analyze_video
-from .render import (FFMPEG, DEFAULT_SETTINGS, auto_trim, build_preview, decode_plan, imwrite, load_plan,
+from .render import (FFMPEG, DEFAULT_SETTINGS, auto_trim, build_preview, decode_plan, imwrite, load_plan, show_windows,
                      merged_settings, render_outputs, rooms_by_floor, routing, structure_alpha)
 from .track import compute_room_track
 
@@ -94,7 +94,8 @@ def title_of(proj: dict) -> str:
 
 
 def floors_for_render(d: Path, proj: dict) -> list[dict]:
-    return [{"id": f["id"], "label": f["label"], "path": d / f["file"], "edits": f.get("edits", [])} for f in proj["floors"]]
+    return [{"id": f["id"], "label": f["label"], "path": d / f["file"], "edits": f.get("edits", []),
+             "show_start": f.get("show_start"), "show_end": f.get("show_end")} for f in proj["floors"]]
 
 
 def public_project(pid: str) -> dict:
@@ -254,8 +255,20 @@ def update_project(pid: str, body: ProjectUpdate):
         proj["name"] = body.name
     if body.floors is not None:
         by_id = {f["id"]: f for f in proj["floors"]}
+
+        def show_time(f, key):
+            # when this floor's plan appears / disappears (seconds); None = video edge
+            v = f.get(key, by_id[f["id"]].get(key)) if key in f else by_id[f["id"]].get(key)
+            if v in (None, ""):
+                return None
+            try:
+                return round(max(0.0, float(v)), 2)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "도면 노출 시각이 잘못되었습니다")
+
         proj["floors"] = [{**by_id[f["id"]], "label": str(f.get("label", by_id[f["id"]]["label"])),
-                           "edits": clean_edits(f["edits"]) if "edits" in f else by_id[f["id"]].get("edits", [])}
+                           "edits": clean_edits(f["edits"]) if "edits" in f else by_id[f["id"]].get("edits", []),
+                           "show_start": show_time(f, "show_start"), "show_end": show_time(f, "show_end")}
                           for f in body.floors if f.get("id") in by_id]
     floor_ids = {f["id"] for f in proj["floors"]}
     if body.rooms is not None:
@@ -272,10 +285,15 @@ def update_project(pid: str, body: ProjectUpdate):
     room_ids = {r["id"] for r in proj["rooms"]}
     if body.events is not None:
         try:
-            # "mode" / "sec" override the default transition / duration for this one room change
+            # "mode" / "sec" override the default transition / duration for this one room change;
+            # "via" = bend points (plan px) the straight walk passes through, in order
+            def via_of(e):
+                pts = [[round(float(q[0]), 1), round(float(q[1]), 1)] for q in (e.get("via") or [])[:30]]
+                return {"via": pts} if pts else {}
             evs = [{"t": round(float(e["t"]), 3), "room": str(e["room"]),
                     **({"mode": e["mode"]} if e.get("mode") in ("walk", "jump") else {}),
-                    **({"sec": round(min(60.0, max(0.0, float(e["sec"]))), 2)} if e.get("sec") not in (None, "") else {})}
+                    **({"sec": round(min(60.0, max(0.0, float(e["sec"]))), 2)} if e.get("sec") not in (None, "") else {}),
+                    **via_of(e)}
                    for e in body.events]
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "잘못된 이동 기록입니다")
@@ -407,13 +425,14 @@ def get_track(pid: str, fps: float = 30.0):
     fids = [f["id"] for f in proj["floors"]]
     plans = [load_plan(d / f["file"]) for f in proj["floors"]]
     edits = [f.get("edits", []) for f in proj["floors"]]
-    tr = compute_room_track(proj["rooms"], proj["events"], fids, times, s, *routing(fids, plans, s, edits))
+    tr = compute_room_track(proj["rooms"], proj["events"], fids, times, s, *routing(fids, plans, s, edits),
+                            show_windows(proj["floors"]))
     if tr is None:
-        return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "moves": []}
+        return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "pf": [], "pa": [], "moves": []}
     moves = [{k: v if isinstance(v, str) else round(float(v), 2) for k, v in m.items()} for m in tr["moves"]]
     return {"fps": fps, "floor": tr["floor"].tolist(), "moves": moves,
             "x": np.round(tr["x"], 1).tolist(), "y": np.round(tr["y"], 1).tolist(),
-            "a": np.round(tr["alpha"], 2).tolist()}
+            "a": np.round(tr["alpha"], 2).tolist(), "pf": tr["pfloor"].tolist(), "pa": np.round(tr["panel"], 2).tolist()}
 
 
 @app.get("/api/projects/{pid}/minimap")

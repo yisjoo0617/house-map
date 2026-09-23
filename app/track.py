@@ -14,7 +14,7 @@ from typing import Callable
 
 import numpy as np
 
-Router = Callable[[str, tuple, tuple], list]
+Router = Callable[[str, tuple, tuple], list]   # kept for callers; None = straight lines
 MAX_MOVE_SEC = 30.0
 
 
@@ -61,7 +61,9 @@ def plan_moves(rooms: list[dict], events: list[dict], floor_ids: list[str], sett
         kind = "walk" if (mode == "walk" and same_floor) else "fade"
         own = evs[i].get("sec")  # this one move's duration, set in the record table (None = follow the settings)
         if kind == "walk":
-            poly = np.asarray(router(a["floor"], pa, pb) if router else [pa, pb], float)
+            # straight legs: room -> each bend point set in the plan editor ("via") -> room
+            via = [(float(q[0]), float(q[1])) for q in (evs[i].get("via") or []) if len(q) == 2]
+            poly = np.asarray(router(a["floor"], pa, pb) if router else [pa, *via, pb], float)
             length = float(np.linalg.norm(np.diff(poly, axis=0), axis=1).sum())
             if own is not None:
                 dur = max(0.0, float(own))
@@ -94,8 +96,9 @@ def compute_room_track(
     settings: dict | None = None,
     router: Router | None = None,
     floor_sizes: dict[str, float] | None = None,
+    windows: list[tuple[float | None, float | None]] | None = None,   # per floor: (show start, show end)
 ) -> dict | None:
-    """Per-time floor index, x, y and marker opacity (or None if nothing is recorded)."""
+    """Per-time floor index, x, y, marker opacity and panel opacity (or None if nothing is recorded)."""
     settings = settings or {}
     moves, evs, by_id = plan_moves(rooms, events, floor_ids, settings, router, floor_sizes)
     if not evs:
@@ -133,4 +136,41 @@ def compute_room_track(
             alpha[sel] = k * k * (3 - 2 * k)
     info = [{"t": m["t"], "start": m["start"], "end": m["end"], "delay": max(0.0, m["start"] - m["planned"]),
              "kind": m["kind"]} for m in moves]
-    return {"t": times, "floor": floor, "x": x, "y": y, "alpha": alpha, "moves": info}
+    pfloor, panel = panel_plan(times, floor, windows or [], float(settings.get("panel_fade_sec", 0.6)))
+    return {"t": times, "floor": floor, "x": x, "y": y, "alpha": alpha, "pfloor": pfloor, "panel": panel, "moves": info}
+
+
+def panel_plan(times: np.ndarray, floor: np.ndarray, windows: list[tuple[float | None, float | None]],
+               fade: float) -> tuple[np.ndarray, np.ndarray]:
+    """Which plan is on screen per frame (-1 = none) and its opacity 0..1.
+
+    A floor with a show window (start/end in seconds, None = video edge) is on screen exactly inside that
+    window, whatever the marker does; if two windows overlap, the one that started last wins. A floor
+    without a window is "automatic": it is on screen while the marker is on it and no window is active.
+    The plan eases in/out over `fade` seconds whenever the plan on screen changes (not at the video edges).
+    Only one plan is ever on screen, so two floors never show together."""
+    n = len(times)
+    pf = np.full(n, -1, dtype=int)
+    auto = [i for i, w in enumerate(windows) if w == (None, None)] if windows else list(range(int(floor.max()) + 1))
+    on_auto = np.isin(floor, auto)
+    pf[on_auto] = floor[on_auto]
+    best_start = np.full(n, -np.inf)
+    for i, (s0, e0) in enumerate(windows):
+        if s0 is None and e0 is None:
+            continue
+        lo, hi = (-np.inf if s0 is None else float(s0)), (np.inf if e0 is None else float(e0))
+        sel = (times >= lo) & (times < hi) & (lo >= best_start)
+        pf[sel], best_start[sel] = i, lo
+    # ease at every change of the plan on screen
+    pa = np.where(pf >= 0, 1.0, 0.0)
+    fade = max(float(fade), 1e-6)
+    change = np.flatnonzero(np.diff(pf) != 0) + 1          # first index of each new run
+    for k in change:
+        t0 = times[k]
+        if pf[k] >= 0:
+            sel = (times >= t0) & (times < t0 + fade) & (pf == pf[k])
+            pa[sel] = np.minimum(pa[sel], (times[sel] - t0) / fade)
+        if pf[k - 1] >= 0:
+            sel = (times < t0) & (times >= t0 - fade) & (pf == pf[k - 1])
+            pa[sel] = np.minimum(pa[sel], (t0 - times[sel]) / fade)
+    return pf, np.clip(pa, 0, 1)

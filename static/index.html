@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>House-Map 미니맵 생성기</title>
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=9" />
 </head>
 <body>
 <header>
@@ -125,9 +125,11 @@
     <div class="card">
       <div class="mode-tabs">
         <button data-mode="rooms" class="active">① 방 · 이동 기록</button>
-        <button data-mode="draw">② 도면 다듬기</button>
+        <button data-mode="route" title="이동 경로를 직선으로 잇고, 찍은 점에서 꺾습니다">② 경로 꺾기</button>
+        <button data-mode="draw">③ 도면 다듬기</button>
       </div>
       <div class="floor-tabs" id="floorTabs"></div>
+      <div class="floor-show" id="floorShow"></div>
       <div id="drawBar" class="drawbar hidden">
         <div class="tools">
           <button data-tool="line" class="active" title="선 (L): 드래그. 수평·수직에 자동으로 맞춰지고 Alt를 누르면 자유 각도">／ 선</button>
@@ -214,7 +216,8 @@
           <option value="slide">걸어서 이동</option><option value="jump">스르르 사라졌다 나타나기</option></select></label>
         <label title="스르르 전환(층 이동 포함)에서 사라졌다 나타나는 데 걸리는 시간">스르르 전환 시간 <span class="val" id="fadeVal"></span>
           <input type="range" min="0.2" max="2" step="0.1" data-setting="fade_sec" /></label>
-        <label class="chk" title="벽을 피해서 문과 통로로 지나갑니다. 끄면 두 방을 직선으로 잇습니다"><input type="checkbox" data-setting="follow_path" /> 벽을 피해 길 따라 이동</label>
+        <label title="층별 노출 시작·종료 시각에서 도면이 스르륵 나타나고 사라지는 시간 (도면 위 층 탭 아래에서 시각을 정합니다)">도면 스르륵 시간 <span class="val" id="panelFadeVal"></span>
+          <input type="range" min="0" max="3" step="0.1" data-setting="panel_fade_sec" /></label>
         <label>이동 시간 정하기<select data-setting="move_timing">
           <option value="speed">속도로 (먼 방일수록 오래)</option><option value="time">모든 이동 같은 시간</option></select></label>
         <label data-when="move_timing=speed">이동 속도 <span class="val" id="crossVal"></span>
@@ -252,6 +255,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>

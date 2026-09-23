@@ -307,7 +307,61 @@ function renderFloorTabs() {
   tabs.push(`<button id="addFloorBtn" title="도면 이미지 추가">+ 층 추가</button>`);
   if (state.proj.floors.length > 1) tabs.push(`<button class="del" id="delFloorBtn">이 층 삭제</button>`);
   $("#floorTabs").innerHTML = tabs.join("");
+  renderFloorShow();
 }
+
+// ---------------- per-floor show window (when this plan appears / disappears) ----------------
+
+function renderFloorShow() {
+  const f = floorOf(state.viewFloor);
+  if (!f) return;
+  const v = (x) => (x == null ? "" : fmtTime(x));
+  $("#floorShow").innerHTML = `
+    <span class="muted">${escapeHtml(f.label)} 도면 노출</span>
+    <label>시작 <input data-show="show_start" value="${v(f.show_start)}" placeholder="영상 처음" title="이 층 도면이 나타나는 시각 (분:초 또는 초)" /></label>
+    <button data-show-now="show_start" title="현재 재생 시각을 시작으로">⏺ 현재</button>
+    <span class="muted">~</span>
+    <label>종료 <input data-show="show_end" value="${v(f.show_end)}" placeholder="영상 끝" title="이 층 도면이 사라지는 시각 (분:초 또는 초)" /></label>
+    <button data-show-now="show_end" title="현재 재생 시각을 종료로">⏺ 현재</button>
+    ${f.show_start != null || f.show_end != null ? `<button data-show-clear title="이 층은 항상 노출">지우기</button>` : ""}
+    <span class="muted small">${showNote(f)}</span>`;
+}
+
+// "1F 0:10 ~ 2:30" checks: a window that ends before it starts, or overlaps another floor's window
+function showNote(f) {
+  const a0 = f.show_start ?? 0, a1 = f.show_end ?? Infinity;
+  if (a1 <= a0) return "⚠ 종료가 시작보다 앞입니다";
+  for (const g of state.proj.floors) {
+    if (g === f || (g.show_start == null && g.show_end == null)) continue;
+    const b0 = g.show_start ?? 0, b1 = g.show_end ?? Infinity;
+    if (a0 < b1 && b0 < a1) return `⚠ ${escapeHtml(g.label)} 노출 구간과 겹칩니다 (겹치는 동안은 나중에 시작한 층이 보입니다)`;
+  }
+  return f.show_start == null && f.show_end == null ? "구간을 정하지 않으면 마커가 이 층에 있을 때 보입니다" : "이 구간에는 마커 위치와 상관없이 이 층 도면이 보이고, 마커는 이 층에 있을 때만 나타납니다";
+}
+
+function parseTime(str) {
+  const t = String(str).trim();
+  if (!t) return null;
+  const m = t.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+  const v = m ? +m[1] * 60 + +m[2] : parseFloat(t);
+  return Number.isFinite(v) && v >= 0 ? +v.toFixed(2) : null;
+}
+
+$("#floorShow").addEventListener("change", (e) => {
+  const inp = e.target.closest("[data-show]");
+  if (!inp) return;
+  const f = floorOf(state.viewFloor);
+  const v = parseTime(inp.value);
+  if (v == null) delete f[inp.dataset.show]; else f[inp.dataset.show] = v;
+  renderFloorShow();
+  saveEdits();
+});
+$("#floorShow").addEventListener("click", (e) => {
+  const now = e.target.closest("[data-show-now]");
+  const f = floorOf(state.viewFloor);
+  if (now) { f[now.dataset.showNow] = +video.currentTime.toFixed(2); renderFloorShow(); saveEdits(); }
+  else if (e.target.closest("[data-show-clear]")) { delete f.show_start; delete f.show_end; renderFloorShow(); saveEdits(); }
+});
 
 $("#floorTabs").addEventListener("click", async (e) => {
   const b = e.target.closest("button");
@@ -363,7 +417,7 @@ $("#addFloorFile").addEventListener("change", async (e) => {
 // ---------------- settings ----------------
 
 // settings that change where the marker is at a given time -> re-fetch the track
-const MOVE_SETTINGS = ["transition", "fade_sec", "transition_sec", "follow_path", "move_timing", "cross_sec", "move_anchor", "line_mode", "line_threshold"];
+const MOVE_SETTINGS = ["transition", "fade_sec", "panel_fade_sec", "transition_sec", "move_timing", "cross_sec", "move_anchor", "line_mode", "line_threshold"];
 
 function syncSettingLabels() {
   const s = state.proj?.settings;
@@ -371,6 +425,7 @@ function syncSettingLabels() {
   $("#crossVal").textContent = `도면 끝→끝 ${(+s.cross_sec).toFixed(1)}초`;
   $("#transVal").textContent = `${(+s.transition_sec).toFixed(1)}초`;
   $("#fadeVal").textContent = `${(+s.fade_sec).toFixed(1)}초`;
+  $("#panelFadeVal").textContent = `${(+s.panel_fade_sec).toFixed(1)}초`;
   for (const el of $$("[data-when]")) {
     const [k, v] = el.dataset.when.split("=");
     el.classList.toggle("hidden", String(s[k]) !== v);
@@ -496,8 +551,12 @@ async function flushSaves() {
   }
 }
 
+let trackSeq = 0;
 async function refreshTrack() {
-  state.track = await api(`/api/projects/${state.proj.id}/track?fps=30`);
+  const seq = ++trackSeq;
+  const tr = await api(`/api/projects/${state.proj.id}/track?fps=30`);
+  if (seq !== trackSeq) return;   // a newer request is already in flight; don't let a stale answer win
+  state.track = tr;
   renderEvents();
   tick();
 }
@@ -571,9 +630,74 @@ function renderEvents() {
           <option value="jump" ${e.mode === "jump" ? "selected" : ""}>스르르 전환</option></select>
         <label class="evsec" title="이 구간만 걸리는 시간(초). 비우면 전체 설정을 따릅니다">
           <input type="number" data-ev-sec="${i}" min="0" max="60" step="0.1" value="${e.sec ?? ""}" placeholder="${defaultSec(i)}" />초</label>` : ""}</td>
-      <td>${i > 0 ? `<button data-ev-play="${i}" title="이 이동만 재생해서 확인 (앞뒤 1.5초)">▶ 이동 확인</button>` : ""}</td>
+      <td>${i > 0 ? `<button data-ev-play="${i}" title="이 이동만 재생해서 확인 (앞뒤 1.5초)">▶ 이동 확인</button>` : ""}
+        ${e.via?.length ? `<span class="evroute-row"><span class="muted">↩ 꺾임 ${e.via.length}</span><button data-ev-route-clear="${i}" class="evroute-clear" title="꺾은 점을 모두 지우고 직선으로 되돌립니다">초기화</button></span>` : ""}</td>
       <td><button data-ev-del="${i}" title="삭제">✕</button></td>
     </tr>`).join("") || `<tr><td colspan="3" class="muted">영상을 재생하며 숫자키를 누르거나 방을 클릭하세요</td></tr>`;
+}
+
+// ---------------- route bending (straight legs through points you set) ----------------
+// A walk goes room -> via[0] -> via[1] -> ... -> room in straight lines. "via" lives on the event.
+
+function canBend(i) {
+  const e = state.events[i], prev = state.events[i - 1];
+  if (!e || !prev || e.room === prev.room) return false;
+  const a = roomById(prev.room), b = roomById(e.room);
+  const mode = e.mode || (state.proj.settings.transition === "jump" ? "jump" : "walk");
+  return !!(a && b && a.floor === b.floor && mode === "walk");
+}
+
+function routePoly(e) {
+  const i = state.events.indexOf(e);
+  const a = roomById(state.events[i - 1].room), b = roomById(e.room);
+  return [[a.x, a.y], ...(e.via || []), [b.x, b.y]];
+}
+
+// the walks that can be bent on the floor being viewed
+function bendableMoves() {
+  return state.events.filter((e, i) => canBend(i) && roomById(e.room).floor === state.viewFloor);
+}
+
+function updatePlanHint() {
+  $("#planHint").textContent = state.mode === "draw"
+    ? "빨간 선 = 자동으로 인식된 벽 · 파란 선 = 직접 그린 선 · 문과 계단은 직접 그리고, 가구 찌꺼기는 지우개로 지우세요"
+    : state.mode === "route"
+      ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 직선으로 되돌리기"
+      : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
+}
+
+// nearest bend handle of any move on this floor: {ev, k} or null
+function hitVia(p) {
+  const tol = 12 * cssPx();
+  let best = null, bd = tol;
+  for (const ev of bendableMoves()) {
+    (ev.via || []).forEach((q, k) => {
+      const d = Math.hypot(q[0] - p.x, q[1] - p.y);
+      if (d < bd) { bd = d; best = { ev, k }; }
+    });
+  }
+  return best;
+}
+
+function segDist(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((p.x - a[0]) * dx + (p.y - a[1]) * dy) / l2)) : 0;
+  return Math.hypot(p.x - (a[0] + t * dx), p.y - (a[1] + t * dy));
+}
+
+// a new bend goes into the leg (of any move on this floor) it is closest to, so you click near the line you mean
+function insertVia(p) {
+  let best = null, bd = Infinity;
+  for (const ev of bendableMoves()) {
+    const poly = routePoly(ev);
+    for (let k = 0; k < poly.length - 1; k++) {
+      const d = segDist(p, poly[k], poly[k + 1]);
+      if (d < bd) { bd = d; best = { ev, k }; }
+    }
+  }
+  if (!best) { flash("이 층에는 꺾을 수 있는 이동이 없습니다"); return false; }
+  (best.ev.via ||= []).splice(best.k, 0, [+p.x.toFixed(1), +p.y.toFixed(1)]);
+  return true;
 }
 
 // what the settings would give this move, shown as the placeholder of the per-move seconds box
@@ -611,6 +735,11 @@ $("#evTable").addEventListener("click", (e) => {
   if (s) { e.preventDefault(); video.pause(); video.currentTime = state.events[+s.dataset.evSeek].t; }
   const pl = e.target.closest("[data-ev-play]");
   if (pl) playAround(state.events[+pl.dataset.evPlay].t);
+  const rc = e.target.closest("[data-ev-route-clear]");
+  if (rc) {
+    const ev = state.events[+rc.dataset.evRouteClear];
+    if (ev.via?.length && confirm(`이 구간의 꺾은 점 ${ev.via.length}개를 지우고 직선으로 되돌릴까요?`)) { delete ev.via; saveRoomsEvents(); flash("경로 초기화"); }
+  }
   const d = e.target.closest("[data-ev-del]");
   if (d) { state.events.splice(+d.dataset.evDel, 1); saveRoomsEvents(); }
 });
@@ -659,6 +788,17 @@ planCv.addEventListener("pointerdown", (e) => {
   if (!state.proj || e.button !== 0 || !viewImg()) return;
   if (state.mode === "draw") return drawDown(e);
   const p = planPoint(e);
+  if (state.mode === "route") {
+    const h = hitVia(p);
+    if (h) {
+      planCv.setPointerCapture(e.pointerId);
+      state.drag = { via: h.k, ev: h.ev, start: p, moved: false };
+      return;
+    }
+    if (hitRoom(p)) return;   // a room point is never a bend
+    if (insertVia(p)) saveRoomsEvents();
+    return;
+  }
   const hit = hitRoom(p);
   if (hit) {
     planCv.setPointerCapture(e.pointerId);
@@ -680,8 +820,8 @@ planCv.addEventListener("pointermove", (e) => {
   const p = planPoint(e);
   if (!d.moved && Math.hypot(p.x - d.start.x, p.y - d.start.y) < 4 * cssPx()) return;
   d.moved = true;
-  d.room.x = p.x;
-  d.room.y = p.y;
+  if (d.via != null) d.ev.via[d.via] = [+p.x.toFixed(1), +p.y.toFixed(1)];
+  else { d.room.x = p.x; d.room.y = p.y; }
   drawPlan();
 });
 
@@ -690,6 +830,7 @@ planCv.addEventListener("pointerup", (e) => {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
+  if (d.via != null) { if (d.moved) saveRoomsEvents(); return; }
   if (d.moved) saveRoomsEvents();
   else recordRoom(d.room);
 });
@@ -697,6 +838,11 @@ planCv.addEventListener("pointerup", (e) => {
 planCv.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   if (state.mode === "draw") return;
+  if (state.mode === "route") {
+    const h = hitVia(planPoint(e));
+    if (h) { h.ev.via.splice(h.k, 1); if (!h.ev.via.length) delete h.ev.via; saveRoomsEvents(); }
+    return;
+  }
   const hit = hitRoom(planPoint(e));
   if (hit) deleteRoom(hit);
 });
@@ -733,10 +879,8 @@ function setMode(mode) {
   state.mode = mode;
   for (const b of $$("[data-mode]")) b.classList.toggle("active", b.dataset.mode === mode);
   $("#drawBar").classList.toggle("hidden", mode !== "draw");
-  $("#planHint").textContent = mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽 · 파란 선 = 직접 그린 선 · 문과 계단은 직접 그리고, 가구 찌꺼기는 지우개로 지우세요"
-    : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
-  planCv.style.cursor = mode === "draw" ? "crosshair" : "";
+  updatePlanHint();
+  planCv.style.cursor = mode === "rooms" ? "" : "crosshair";
   if (mode === "draw") loadStruct();
   drawPlan();
 }
@@ -1034,6 +1178,26 @@ function drawPlan() {
   }
 
   drawRoute(ctx, u);
+  if (state.mode === "route") {
+    for (const ev of bendableMoves()) {
+      const poly = routePoly(ev);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 3 * u;
+      ctx.lineJoin = ctx.lineCap = "round";
+      ctx.beginPath();
+      poly.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+      ctx.stroke();
+      for (const q of ev.via || []) {
+        ctx.fillStyle = "#fff";
+        ctx.strokeStyle = "#2563eb";
+        ctx.lineWidth = 2.5 * u;
+        ctx.beginPath();
+        ctx.arc(q[0], q[1], 6 * u, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+  }
 
   const cur = roomAt(video.currentTime);
   state.rooms.forEach((r, i) => {
@@ -1077,10 +1241,12 @@ function poseAt(t) {
   const f = Math.max(0, Math.min(tr.x.length - 1, t * tr.fps));
   const i = Math.floor(f), j = Math.min(i + 1, tr.x.length - 1), a = f - i;
   const al = tr.a?.length ? tr.a[i] + ((tr.a[j] ?? tr.a[i]) - tr.a[i]) * a : 1;
+  const pa = tr.pa?.length ? tr.pa[i] + ((tr.pa[j] ?? tr.pa[i]) - tr.pa[i]) * a : 1;
+  const pf = tr.pf?.length ? tr.pf[i] : tr.floor[i];   // the plan on screen (may differ from the marker's floor)
   // across a fade switch (room or floor) don't slide between the two rooms
   if (tr.floor[i] !== tr.floor[j] || (tr.a?.[i] < 1 && tr.a?.[j] < 1 && (tr.x[i] !== tr.x[j] || tr.y[i] !== tr.y[j])))
-    return { x: tr.x[i], y: tr.y[i], floor: tr.floor[i], a: al };
-  return { x: tr.x[i] + (tr.x[j] - tr.x[i]) * a, y: tr.y[i] + (tr.y[j] - tr.y[i]) * a, floor: tr.floor[i], a: al };
+    return { x: tr.x[i], y: tr.y[i], floor: tr.floor[i], a: al, pa, pf };
+  return { x: tr.x[i] + (tr.x[j] - tr.x[i]) * a, y: tr.y[i] + (tr.y[j] - tr.y[i]) * a, floor: tr.floor[i], a: al, pa, pf };
 }
 
 // ---------------- minimap preview (server-rendered panel + marker sprite) ----------------
@@ -1100,17 +1266,21 @@ function drawOverlay() {
   const m = state.mini;
   if (!state.proj || !m || !$("#previewToggle").checked) return;
   const pose = poseAt(video.currentTime);
-  const fl = pose ? pose.floor : 0;
+  const fl = pose ? pose.pf : 0;
   const F = m.floors[fl];
   if (!F?.img) return;
+  const pa = pose ? pose.pa : 1;
+  if (fl < 0 || pa <= 0) return;   // no plan on screen at this time
   const k = overlay.width / m.frame[0];
   ctx.setTransform(k, 0, 0, k, 0, 0);
   ctx.imageSmoothingQuality = "high";
+  ctx.globalAlpha = pa;
   ctx.drawImage(F.img, m.x0, m.y0, m.w, m.h);
-  if (pose) {
+  ctx.globalAlpha = 1;
+  if (pose && pose.floor === fl) {   // the marker is drawn only when it is on the plan that is on screen
     const px = m.x0 + F.ox + pose.x * F.scale, py = m.y0 + F.oy + pose.y * F.scale;
     const hs = m.marker.half;
-    ctx.globalAlpha = state.proj.settings.opacity * pose.a;
+    ctx.globalAlpha = state.proj.settings.opacity * pose.a * pa;
     ctx.drawImage(markerSprite(m.marker, performance.now() / 1000), px - hs - 0.5, py - hs - 0.5, 2 * hs + 1, 2 * hs + 1);
     ctx.globalAlpha = 1;
   }
@@ -1179,6 +1349,16 @@ function drawTimeline() {
     ctx.fillStyle = "#f59e0b";
     for (const sg of state.analysis.suggestions) ctx.fillRect(X(sg.t) - 1.5 * dpr, 0, 3 * dpr, 10 * dpr);
   }
+  // each floor's show window as a thin strip just above the bands (grey = plan hidden there)
+  const sy = 11 * dpr, sh = 4 * dpr;
+  ctx.fillStyle = "rgba(120,120,120,.25)";
+  ctx.fillRect(0, sy, W, sh);
+  state.proj.floors.forEach((f, i) => {
+    if (f.show_start == null && f.show_end == null) return;
+    const x0 = X(f.show_start ?? 0), x1 = X(Math.min(f.show_end ?? dur, dur));
+    ctx.fillStyle = i % 2 ? "rgba(139, 92, 246, .8)" : "rgba(16, 185, 129, .8)";
+    ctx.fillRect(x0, sy, Math.max(x1 - x0, dpr), sh);
+  });
   // when the marker is actually on the move: a strip from departure to arrival along the bottom of the bands
   for (const m of state.track?.moves || []) {
     if (m.end <= m.start) continue;
@@ -1238,9 +1418,12 @@ timeline.addEventListener("pointermove", (e) => {
   const ev = nearest(state.events, t, r);
   const sug = state.analysis && nearest(state.analysis.suggestions, t, r);
   const mv = state.track?.moves?.find((m) => m.end > m.start && t >= m.start && t <= m.end);
+  const win = state.proj.floors.filter((f) => f.show_start != null || f.show_end != null)
+    .map((f) => `${f.label} 도면 ${f.show_start != null ? fmtTime(f.show_start) : "처음"} ~ ${f.show_end != null ? fmtTime(f.show_end) : "끝"}`).join(" · ");
   timeline.style.cursor = ev ? "ew-resize" : "pointer";
   timeline.title = ev ? `${fmtTime(ev.t)} → ${roomById(ev.room)?.name || ""} (드래그로 조정)` : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
-    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} 출발 ${fmtTime(mv.start)} → 도착 ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)` : fmtTime(t);
+    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} 출발 ${fmtTime(mv.start)} → 도착 ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
+    : win ? `${fmtTime(t)} · ${win}` : fmtTime(t);
 });
 
 timeline.addEventListener("pointerup", () => {

@@ -166,35 +166,14 @@ def test_fixture_shapes_and_thin_lines():
     assert 0 < thin.sum() < 0.6 * thick.sum()
 
 
-def _wall_with_door():
-    """800x400 white plan, outer walls, and a middle wall whose only opening is near the bottom."""
-    plan = np.full((400, 800, 3), 255, np.uint8)
-    cv2.rectangle(plan, (20, 20), (780, 380), (20, 20, 20), 12)
-    cv2.line(plan, (400, 20), (400, 300), (20, 20, 20), 12)   # door gap from y=300 to 380
-    return plan
-
-
-def test_route_goes_through_the_doorway_not_the_wall():
-    from app.path import route
-    plan = _wall_with_door()
-    s = merged_settings({"line_mode": "walls"})
-    pts = np.array(route(plan, s, [], (200, 100), (600, 100)))
-    assert pts[0].tolist() == [200, 100] and pts[-1].tolist() == [600, 100]
-    crossing = pts[np.argmin(np.abs(pts[:, 0] - 400))]
-    assert crossing[1] > 300                                  # passes the wall line inside the door gap
-    length = np.linalg.norm(np.diff(pts, axis=0), axis=1).sum()
-    assert length > 550                                       # a detour (~620px), not the 400px straight line
-
-
-def test_drawn_line_closes_an_opening():
-    from app.path import route
-    plan = _wall_with_door()
-    s = merged_settings({"line_mode": "walls"})
-    shut = [{"type": "line", "pts": [[400, 300], [400, 380]]}]
-    open_len = np.linalg.norm(np.diff(np.array(route(plan, s, [], (200, 100), (600, 100))), axis=0), axis=1).sum()
-    # with the doorway closed the only way is through a wall: the route falls back to crossing it
-    pts = np.array(route(plan, s, shut, (200, 100), (600, 100)))
-    assert np.linalg.norm(np.diff(pts, axis=0), axis=1).sum() < open_len
+def test_walk_bends_at_the_moves_via_points():
+    from app.track import plan_moves
+    rooms = [{"id": "a", "floor": "f1", "x": 0, "y": 0}, {"id": "b", "floor": "f1", "x": 400, "y": 0}]
+    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "b", "via": [[0, 300], [400, 300]]}]
+    s = {"move_timing": "speed", "cross_sec": 10.0, "move_anchor": "start"}
+    moves, _, _ = plan_moves(rooms, events, ["f1"], s, None, {"f1": 1000.0})
+    assert moves[0]["poly"].tolist() == [[0, 0], [0, 300], [400, 300], [400, 0]]   # straight legs through the bends
+    assert moves[0]["end"] - moves[0]["start"] == pytest.approx(10.0)             # 1000px at 100px/s (not the 400px line)
 
 
 def test_speed_mode_scales_duration_with_route_length():
@@ -202,7 +181,7 @@ def test_speed_mode_scales_duration_with_route_length():
     rooms = [{"id": "a", "floor": "f1", "x": 0, "y": 0}, {"id": "b", "floor": "f1", "x": 100, "y": 0},
              {"id": "c", "floor": "f1", "x": 500, "y": 0}]
     events = [{"t": 0, "room": "a"}, {"t": 10, "room": "b"}, {"t": 20, "room": "c"}]
-    s = {"move_timing": "speed", "cross_sec": 10.0, "move_anchor": "start", "follow_path": False}
+    s = {"move_timing": "speed", "cross_sec": 10.0, "move_anchor": "start"}
     moves, _, _ = plan_moves(rooms, events, ["f1"], s, None, {"f1": 1000.0})
     d1, d2 = (m["end"] - m["start"] for m in moves)
     assert d1 == pytest.approx(1.0) and d2 == pytest.approx(4.0)   # 100px and 400px at 100px/s
@@ -211,7 +190,7 @@ def test_speed_mode_scales_duration_with_route_length():
 
 def test_jump_fades_out_and_in_and_modes_can_be_set_per_move():
     events = [{"t": 0, "room": "a"}, {"t": 5, "room": "b", "mode": "jump"}, {"t": 9, "room": "a"}]
-    s = {"transition": "slide", "move_timing": "time", "transition_sec": 1.0, "fade_sec": 1.0, "follow_path": False}
+    s = {"transition": "slide", "move_timing": "time", "transition_sec": 1.0, "fade_sec": 1.0}
     t = np.array([4.0, 4.5, 4.75, 5.25, 5.5, 6.0, 9.0])
     tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, s)
     a = tr["alpha"]
@@ -228,3 +207,26 @@ def test_floor_change_fades():
     events = [{"t": 0, "room": "a"}, {"t": 5, "room": "c"}]
     tr = compute_room_track(ROOMS, events, ["f1", "f2"], np.array([4.8, 5.0, 5.2]), {"fade_sec": 1.0})
     assert tr["floor"].tolist() == [0, 1, 1] and tr["alpha"][0] < 1 and tr["alpha"][2] < 1
+
+
+def test_show_windows_choose_the_plan_and_ease_in_and_out():
+    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "c"}]          # marker: f1 until ~10s, then f2
+    t = np.array([0.0, 1.0, 1.3, 2.0, 5.0, 7.7, 8.0, 8.3, 9.0, 12.0, 14.7, 15.0, 16.0])
+    tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, {"fade_sec": 1.0, "panel_fade_sec": 0.6},
+                            windows=[(1.0, 8.0), (8.0, 15.0)])
+    pf, pa = tr["pfloor"], tr["panel"]
+    assert pf[0] == -1 and pa[0] == 0                                  # nothing on screen before any window
+    assert pf[1] == 0 and pa[1] == 0 and 0.4 < pa[2] < 0.6 and pa[3] == 1   # 1F eases in from 1.0
+    assert 0.4 < pa[5] < 0.6                                           # ...and out before 8.0
+    assert pf[6] == 1 and pa[6] == 0 and 0.4 < pa[7] < 0.6             # 2F takes over at 8.0 although the marker is still on 1F
+    assert tr["floor"][8] == 0 and pf[8] == 1                          # (marker on 1F, plan 2F -> marker hidden by the renderer)
+    assert pf[9] == 1 and pa[9] == 1 and 0.4 < pa[10] < 0.6            # 2F eases out before 15.0
+    assert pf[11] == -1 and pa[11] == 0 and pa[12] == 0                # nothing after the last window
+
+
+def test_floor_without_window_follows_the_marker():
+    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "c"}]
+    t = np.array([0.0, 5.0, 9.0, 12.0, 20.0, 30.0])
+    tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
+    assert tr["pfloor"].tolist() == [0, 0, 0, 1, 1, -1]                # auto 1F, then 2F's window, then nothing
+    assert tr["panel"][0] == 1                                         # no fade-in at the very start of the video

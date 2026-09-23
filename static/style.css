@@ -61,6 +61,10 @@ progress { width: 160px; vertical-align: middle; }
 .floor-tabs { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
 .floor-tabs button.active { background: var(--text); color: var(--card); border-color: var(--text); }
 .floor-tabs .del { margin-left: auto; font-size: 12px; }
+.floor-show { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; margin: -2px 0 8px; }
+.floor-show label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); }
+.floor-show input { width: 68px; padding: 2px 5px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
+.floor-show button { font-size: 12px; padding: 2px 7px; white-space: nowrap; }
 #roomBar { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
 #roomBar button { display: inline-flex; gap: 6px; align-items: center; }
 #roomBar button.current { outline: 2px solid var(--accent-2); }
@@ -132,7 +136,7 @@ dialog h2 { margin: 0 0 4px; font-size: 18px; }
 .error:empty { display: none; }
 
 /* ---------- plan editor modes & drawing toolbar ---------- */
-.mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mode-tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .mode-tabs button { border: 0; border-radius: 0; padding: 8px; background: var(--bg); color: var(--muted); font-weight: 600; }
 .mode-tabs button.active { background: var(--accent-2); color: #fff; }
 .drawbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
@@ -164,5 +168,10 @@ input[type=range].reverse { direction: rtl; }  /* right = faster */
 .col-right::-webkit-scrollbar { width: 8px; }
 .col-right::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
 select.evmode { display: block; margin-top: 3px; font-size: 12px; padding: 2px 4px; }
+.evroute-row { display: flex; gap: 6px; align-items: center; margin-top: 3px; font-size: 12px; white-space: nowrap; }
+button.evroute-clear { font-size: 12px; white-space: nowrap; }
+button.evroute-clear { color: var(--muted); }
+button.evroute-clear:hover { color: #dc2626; border-color: #dc2626; }
+button.evroute.active { background: #2563eb; border-color: #2563eb; color: #fff; }
 .evsec { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .evsec input { width: 58px; padding: 2px 4px; margin-right: 3px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }

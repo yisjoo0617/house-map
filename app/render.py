@@ -57,7 +57,7 @@ DEFAULT_SETTINGS = {
     "glow": True,
     "transition": "slide",     # default for each room change: slide (walk) | jump (fade out, fade in at the new room)
     "fade_sec": 0.6,           # jump: fade-out + fade-in time
-    "follow_path": True,       # walk around walls (through doorways) instead of a straight line
+    "panel_fade_sec": 0.6,     # the plan itself eases in/out at each floor's show window
     "move_timing": "speed",    # speed: duration follows the route length | time: every move takes transition_sec
     "cross_sec": 4.0,          # speed: seconds to walk across the whole plan (long side)
     "transition_sec": 0.8,
@@ -422,7 +422,7 @@ class Minimap:
 
         def layout(wp: float) -> dict:
             pad = 0.05 * wp
-            title_h = 0.13 * wp if show_title else 0
+            title_h = 0.11 * wp if show_title else 0
             note_h = 0.07 * wp if show_note else 0
             plan_w = wp - 2 * pad
             plan_h = plan_w * ratio
@@ -462,7 +462,7 @@ class Minimap:
             cw, ch = crop[2] - crop[0], crop[3] - crop[1]
             iw, ih = max(1, int(round(cw * sc))), max(1, int(round(ch * sc)))
             ox = int(round((W - iw) / 2))
-            oy = int(round(box_y + (L["plan_h"] - ih) / 2))
+            oy = int(round(box_y + (L["plan_h"] - ih) * 0.2))   # spare height goes mostly below: keeps the plan close to its label
             # (ox, oy) is where the crop's corner lands; fits map *plan* coordinates
             fit_xy = (ox - crop[0] * sc, oy - crop[1] * sc, sc)
             self.fits.append(fit_xy)
@@ -481,7 +481,8 @@ class Minimap:
                 alpha = alpha.copy()
                 alpha[oy : oy + ih, ox : ox + iw] = mask[oy : oy + ih, ox : ox + iw]
 
-            text_a = self._text_layer(W, H, L, title, label if s["show_floor_label"] else "", show_title, show_note)
+            # header text lines up with the right edge of this floor's plan (not the board's padding)
+            text_a = self._text_layer(W, H, L, title, label if s["show_floor_label"] else "", show_title, show_note, ox + iw)
             if s["show_room_names"]:
                 self._room_names(text_a, floor_rooms, fit_xy, L, (oy, oy + ih))
             content = np.maximum(content, text_a) * noise
@@ -508,7 +509,8 @@ class Minimap:
             cv2.circle(m, (cx, cy), r, 255, -1, cv2.LINE_AA)
         return m.astype(np.float32) / 255
 
-    def _text_layer(self, W: int, H: int, L: dict, title: str, label: str, show_title: bool, show_note: bool) -> np.ndarray:
+    def _text_layer(self, W: int, H: int, L: dict, title: str, label: str, show_title: bool, show_note: bool,
+                    right: float | None = None) -> np.ndarray:
         layer = Image.new("L", (W, H), 0)
         d = ImageDraw.Draw(layer)
         pad = L["pad"]
@@ -516,8 +518,8 @@ class Minimap:
             f_title = _font(self.s, 0.075 * L["wp"])
             f_label = _font(self.s, 0.105 * L["wp"])
             fb_title = _font(self.s, 0.06 * L["wp"], "gothic")
-            base_y = pad + L["title_h"] * 0.78  # text baseline
-            x = W - pad
+            base_y = pad + L["title_h"] * 0.86  # text baseline, close above the plan
+            x = W - pad if right is None else min(W - pad, float(right))
             if label:
                 x -= d.textlength(label, font=f_label)
                 _draw_text(d, x, base_y, label, f_label, fb_title, "l", 255)
@@ -608,9 +610,12 @@ class Minimap:
         ox, oy, sc = self.fits[floor]
         return ox + x * sc, oy + y * sc
 
-    def draw(self, floor: int, x: float, y: float, marker_alpha: float = 1.0, pulse: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    def draw(self, floor: int, x: float, y: float, marker_alpha: float = 1.0, pulse: float = 1.0,
+             panel_alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         img = self.bases[floor].copy()
         alpha = self.alphas[floor].copy()
+        if panel_alpha <= 0:
+            return img, np.zeros_like(alpha)
         px, py = self.to_panel(floor, x, y)
         m_rgb, m_a = self.marker_sprite(pulse)
         hf = self.m_half
@@ -626,6 +631,8 @@ class Minimap:
             c, a = _over(roi.astype(np.float32), ar, sr, sa * float(self.s["opacity"]))
             roi[:] = np.clip(c, 0, 255).astype(np.uint8)
             ar[:] = a
+        if panel_alpha < 1:
+            alpha *= float(panel_alpha)   # the whole panel (board, lines, names, marker) eases in / out together
         return img, alpha
 
     def composite(self, frame: np.ndarray, panel: np.ndarray, alpha: np.ndarray) -> None:
@@ -651,11 +658,17 @@ def _png_data_url(bgra: np.ndarray) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode()
 
 
+def show_windows(floors: list[dict]) -> list[tuple[float | None, float | None]]:
+    """Per floor (show_start, show_end) in seconds; None = from the video start / to its end."""
+    def num(v):
+        return None if v in (None, "") else float(v)
+    return [(num(f.get("show_start")), num(f.get("show_end"))) for f in floors]
+
+
 def routing(floor_ids: list[str], plans: list[np.ndarray], settings: dict, edits: list[list[dict]]):
-    """(router, floor_sizes) for compute_room_track."""
-    from .path import make_router  # path.py builds on this module
-    router = make_router(dict(zip(floor_ids, plans)), settings, dict(zip(floor_ids, edits)))
-    return router, {fid: float(max(p.shape[:2])) for fid, p in zip(floor_ids, plans)}
+    """(router, floor_sizes) for compute_room_track: moves are straight lines (bent only at the points
+    the user sets per move), so there is no router; the plan sizes make "cross_sec" mean the same on any plan."""
+    return None, {fid: float(max(p.shape[:2])) for fid, p in zip(floor_ids, plans)}
 
 
 def rooms_by_floor(rooms: list[dict], floor_ids: list[str]) -> list[list[dict]]:
@@ -750,13 +763,19 @@ def render_outputs(
     fps, total, W, H = probe(video_path)
     times = np.arange(total) / fps
     track = compute_room_track(rooms, events, [f["id"] for f in floors], times, settings,
-                               *routing([f["id"] for f in floors], plans, settings, edits))
+                               *routing([f["id"] for f in floors], plans, settings, edits), show_windows(floors))
     if track is None:
         raise RuntimeError("방 이동 기록이 없습니다. 최소 1개의 방을 지정해주세요")
     mm = minimap_for_frame(plans, labels, settings, title, W, H, per_floor, edits)
-    keys = [(int(f), round(float(x), 1), round(float(y), 1), round(float(a), 2),
-             round(pulse_level(float(t)), 4) if settings["glow"] else 1.0)
-            for f, x, y, a, t in zip(track["floor"], track["x"], track["y"], track["alpha"], times)]
+    # frame key: (plan on screen, marker x, y, marker alpha, glow level, plan alpha); no plan -> a blank frame
+    keys = []
+    for f, pf, x, y, a, t, pa in zip(track["floor"], track["pfloor"], track["x"], track["y"], track["alpha"], times, track["panel"]):
+        if pf < 0 or pa <= 0:
+            keys.append((0, 0.0, 0.0, 0.0, 1.0, 0.0))
+            continue
+        ma = float(a) if int(f) == int(pf) else 0.0          # the marker is on another floor: hidden
+        keys.append((int(pf), round(float(x), 1), round(float(y), 1), round(ma, 2),
+                     round(pulse_level(float(t)), 4) if settings["glow"] and ma > 0 else 1.0, round(float(pa), 2)))
 
     if "overlay" in outputs:
         name = "overlay.mov"
