@@ -367,6 +367,7 @@ $("#floorTabs").addEventListener("click", async (e) => {
   const b = e.target.closest("button");
   if (!b) return;
   if (b.dataset.floor) {
+    video.pause();   // while playing the editor follows the marker's floor; a manual pick stops that
     state.viewFloor = b.dataset.floor;
     renderFloorTabs();
     resizePlan();
@@ -946,9 +947,11 @@ function drawDown(e) {
     if (hit) { pushUndo(); curEdits().splice(curEdits().indexOf(hit), 1); saveEdits(hit.type === "erase"); }
     return;
   }
-  if (t === "door") {
-    const hit = hitEdit(p, ["door"]);
-    if (hit) { state.drawing = { type: "flip", door: hit, start: p }; return; }
+  // clicking an existing door / toilet / stairs with its own tool (or the flip tool) flips it
+  if (FLIPPABLE.includes(t) || t === "flip") {
+    const hit = hitEdit(p, t === "flip" ? FLIPPABLE : [t], true);
+    if (hit) { state.drawing = { type: "flip", target: hit, start: p }; return; }
+    if (t === "flip") return;
   }
   const s = t === "erase" ? p : snapPoint(p, null, e.altKey);
   const r = (+$("#eraseSize").value) * cssPx();
@@ -971,10 +974,10 @@ function drawUp() {
   const d = state.drawing;
   state.drawing = null;
   if (!d) return;
-  const len = d.start ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
+  const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
   const min = 4 * cssPx();
   pushUndo();
-  if (d.type === "flip") d.door.flip = !d.door.flip;
+  if (d.type === "flip") flipEdit(d.target);
   else if (d.type === "erase") curEdits().push({ type: "erase", pts: d.pts, r: d.r });
   else if (len < min) { state.undo.pop(); drawPlan(); return; }
   else if (d.type === "line") curEdits().push({ type: "line", pts: [[d.start.x, d.start.y], [d.end.x, d.end.y]] });
@@ -989,6 +992,15 @@ function segDist(p, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   const t = Math.max(0, Math.min(1, ((p.x - a[0]) * dx + (p.y - a[1]) * dy) / (dx * dx + dy * dy || 1)));
   return Math.hypot(p.x - (a[0] + t * dx), p.y - (a[1] + t * dy));
+}
+
+const FLIPPABLE = ["door", "toilet", "stairs"];
+const TOILET_ELONGATION = 1.3;   // bowl depth / half width (same as the renderer)
+
+function flipEdit(e) {
+  if (e.type === "door") e.flip = !e.flip;                                   // swing direction
+  else if (e.type === "toilet") e.b = [2 * e.a[0] - e.b[0], 2 * e.a[1] - e.b[1]];   // bowl to the other side of the wall
+  else if (e.type === "stairs") e.flip = !e.flip;                           // direction of the step lines
 }
 
 // in-progress drag -> the edit it would create
@@ -1008,10 +1020,16 @@ function ring(cx, cy, r, a0, a1, n = 24) {
   });
 }
 
-function toiletOutline(e) {
+function toiletOutline(e, n = 24) {
   const [ax, ay] = e.a, [bx, by] = e.b;
-  const r = Math.hypot(bx - ax, by - ay), ang = Math.atan2(by - ay, bx - ax);
-  return ring(ax, ay, r, ang - Math.PI / 2, ang + Math.PI / 2);  // arc; the closing chord is the flat side
+  const depth = Math.hypot(bx - ax, by - ay), w = depth / TOILET_ELONGATION, ang = Math.atan2(by - ay, bx - ax);
+  const c = Math.cos(ang), s = Math.sin(ang);
+  // half ellipse from -90° to +90° around the bowl direction; the closing chord is the flat side on the wall
+  return Array.from({ length: n + 1 }, (_, i) => {
+    const t = -Math.PI / 2 + Math.PI * i / n;
+    const u = depth * Math.cos(t), v = w * Math.sin(t);
+    return [ax + u * c - v * s, ay + u * s + v * c];
+  });
 }
 
 const polySegments = (pts, closed) => {
@@ -1036,11 +1054,29 @@ function editSegments(e) {
   return [];
 }
 
-function hitEdit(p, types) {
+// point inside a closed shape (stairs / rect box, toilet half-ellipse)?
+function insideEdit(e, p) {
+  if (e.type === "stairs" || e.type === "rect") {
+    return p.x >= Math.min(e.a[0], e.b[0]) && p.x <= Math.max(e.a[0], e.b[0]) && p.y >= Math.min(e.a[1], e.b[1]) && p.y <= Math.max(e.a[1], e.b[1]);
+  }
+  if (e.type === "toilet") {
+    const poly = toiletOutline(e);
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if (yi > p.y !== yj > p.y && p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  return false;
+}
+
+function hitEdit(p, types, interior = false) {
   let best = null, bd = 8 * cssPx();
   for (const e of curEdits()) {
     if (types && !types.includes(e.type)) continue;
     let d = Math.min(...editSegments(e).map(([a, b]) => segDist(p, a, b)));
+    if (interior && insideEdit(e, p)) d = 0;
     if (e.type === "erase") d -= e.r;
     if (e.type === "door") {
       const r = Math.hypot(e.end[0] - e.hinge[0], e.end[1] - e.hinge[1]);
@@ -1068,17 +1104,18 @@ function drawEditShape(ctx, e) {
     ctx.arc(e.c[0], e.c[1], e.r, 0, Math.PI * 2);
   } else if (e.type === "toilet") {
     const [ax, ay] = e.a, [bx, by] = e.b;
-    const r = Math.hypot(bx - ax, by - ay), ang = Math.atan2(by - ay, bx - ax);
-    ctx.arc(ax, ay, r, ang - Math.PI / 2, ang + Math.PI / 2);
+    const depth = Math.hypot(bx - ax, by - ay), ang = Math.atan2(by - ay, bx - ax);
+    ctx.ellipse(ax, ay, depth, depth / TOILET_ELONGATION, ang, -Math.PI / 2, Math.PI / 2);
     ctx.closePath();
   } else if (e.type === "stairs") {
     const x0 = Math.min(e.a[0], e.b[0]), x1 = Math.max(e.a[0], e.b[0]);
     const y0 = Math.min(e.a[1], e.b[1]), y1 = Math.max(e.a[1], e.b[1]);
     const w = x1 - x0, h = y1 - y0;
     const n = e.steps || Math.min(18, Math.max(4, Math.round(Math.max(w, h) / (Math.min(w, h) * 0.45 + 1e-6))));
+    const across = (h >= w) !== !!e.flip;
     ctx.rect(x0, y0, w, h);
     for (let i = 1; i < n; i++) {
-      if (h >= w) { ctx.moveTo(x0, y0 + h * i / n); ctx.lineTo(x1, y0 + h * i / n); }
+      if (across) { ctx.moveTo(x0, y0 + h * i / n); ctx.lineTo(x1, y0 + h * i / n); }
       else { ctx.moveTo(x0 + w * i / n, y0); ctx.lineTo(x0 + w * i / n, y1); }
     }
   }
@@ -1259,6 +1296,14 @@ function contentRect() {
   return { x: (ew - w) / 2, y: (eh - h) / 2, w, h };
 }
 
+// which plan is on screen at time t and how opaque (works with or without room records)
+function planAt(t) {
+  const tr = state.track;
+  if (!tr?.pf?.length) return { pf: tr?.x?.length ? 0 : -1, pa: 1 };
+  const i = Math.max(0, Math.min(tr.pf.length - 1, Math.round(t * tr.fps)));
+  return { pf: tr.pf[i], pa: tr.pa[i] };
+}
+
 function drawOverlay() {
   const ctx = overlay.getContext("2d");
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1266,11 +1311,10 @@ function drawOverlay() {
   const m = state.mini;
   if (!state.proj || !m || !$("#previewToggle").checked) return;
   const pose = poseAt(video.currentTime);
-  const fl = pose ? pose.pf : 0;
+  const { pf: fl, pa } = planAt(video.currentTime);
+  if (fl < 0 || pa <= 0) return;   // no plan on screen at this time
   const F = m.floors[fl];
   if (!F?.img) return;
-  const pa = pose ? pose.pa : 1;
-  if (fl < 0 || pa <= 0) return;   // no plan on screen at this time
   const k = overlay.width / m.frame[0];
   ctx.setTransform(k, 0, 0, k, 0, 0);
   ctx.imageSmoothingQuality = "high";
@@ -1496,7 +1540,7 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle", KeyE: "erase", KeyX: "delete" };
+const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle", KeyF: "flip", KeyE: "erase", KeyX: "delete" };
 
 document.addEventListener("keydown", (e) => {
   // typing fields keep their keys; checkboxes / sliders / colour pickers don't block shortcuts
@@ -1508,8 +1552,8 @@ document.addEventListener("keydown", (e) => {
     if (e.code === "Delete" || e.code === "Backspace") return;
   }
   if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-  else if (e.code === "ArrowLeft") { e.preventDefault(); e.shiftKey ? stepFrame(-1) : (video.currentTime -= 1); }
-  else if (e.code === "ArrowRight") { e.preventDefault(); e.shiftKey ? stepFrame(1) : (video.currentTime += 1); }
+  else if (e.code === "ArrowLeft") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(-1); else video.currentTime -= e.shiftKey ? 10 : 1; }
+  else if (e.code === "ArrowRight") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(1); else video.currentTime += e.shiftKey ? 10 : 1; }
   else if (/^Digit[1-9]$/.test(e.code) || /^Numpad[1-9]$/.test(e.code)) {
     const room = state.rooms[+e.code.slice(-1) - 1];
     if (room) recordRoom(room);

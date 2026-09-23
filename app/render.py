@@ -240,6 +240,9 @@ def _edit_points(e: dict) -> list:
     return []
 
 
+TOILET_ELONGATION = 1.3   # toilet bowl depth / half width (1.0 would be a plain semicircle)
+
+
 def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.0), value=1, thickness: int = 1) -> None:
     """Vector edits (line / door / stairs / rect / circle / toilet) in plan coordinates, drawn onto img at `scale`.
     Items with "thin": true are drawn at a bit under half the line thickness."""
@@ -261,13 +264,14 @@ def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.
             cv2.circle(img, P(e["c"]), int(r * S), value, thickness, cv2.LINE_AA, shift=4)
             continue
         if t == "toilet":
-            # semicircle: flat side on the wall at a, bowl reaching b
+            # half ellipse: flat side on the wall at a, bowl reaching b; a bit longer than it is wide
             (ax, ay), (bx, by) = e["a"], e["b"]
-            r = math.hypot(bx - ax, by - ay)
+            depth = math.hypot(bx - ax, by - ay)
+            half_w = depth / TOILET_ELONGATION
             ang = math.degrees(math.atan2(by - ay, bx - ax))
-            nx, ny = -(by - ay) / (r or 1), (bx - ax) / (r or 1)
-            cv2.ellipse(img, P((ax, ay)), (int(r * scale * S), int(r * scale * S)), ang, -90, 90, value, thickness, cv2.LINE_AA, shift=4)
-            cv2.line(img, P((ax - nx * r, ay - ny * r)), P((ax + nx * r, ay + ny * r)), value, thickness, cv2.LINE_AA, shift=4)
+            nx, ny = -(by - ay) / (depth or 1), (bx - ax) / (depth or 1)
+            cv2.ellipse(img, P((ax, ay)), (int(depth * scale * S), int(half_w * scale * S)), ang, -90, 90, value, thickness, cv2.LINE_AA, shift=4)
+            cv2.line(img, P((ax - nx * half_w, ay - ny * half_w)), P((ax + nx * half_w, ay + ny * half_w)), value, thickness, cv2.LINE_AA, shift=4)
             continue
         if t == "line" and len(e.get("pts", [])) >= 2:
             cv2.polylines(img, [np.array([P(p) for p in e["pts"]], np.int32)], False, value, thickness, cv2.LINE_AA, shift=4)
@@ -284,8 +288,9 @@ def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.
             cv2.rectangle(img, P((x0, y0)), P((x1, y1)), value, thickness, cv2.LINE_AA, shift=4)
             w, h = x1 - x0, y1 - y0
             n = int(e.get("steps") or np.clip(round(max(w, h) / (min(w, h) * 0.45 + 1e-6)), 4, 18))
+            across = (h >= w) != bool(e.get("flip"))   # flip swaps the direction of the step lines
             for i in range(1, n):
-                if h >= w:
+                if across:
                     y = y0 + h * i / n
                     cv2.line(img, P((x0, y)), P((x1, y)), value, thickness, cv2.LINE_AA, shift=4)
                 else:
@@ -765,7 +770,10 @@ def render_outputs(
     track = compute_room_track(rooms, events, [f["id"] for f in floors], times, settings,
                                *routing([f["id"] for f in floors], plans, settings, edits), show_windows(floors))
     if track is None:
-        raise RuntimeError("방 이동 기록이 없습니다. 최소 1개의 방을 지정해주세요")
+        from .track import plan_only_track
+        track = plan_only_track(times, show_windows(floors), settings)   # windows only, no marker
+    if track is None:
+        raise RuntimeError("방 이동 기록이 없습니다. 방을 기록하거나 층별 도면 노출 구간을 정해주세요")
     mm = minimap_for_frame(plans, labels, settings, title, W, H, per_floor, edits)
     # frame key: (plan on screen, marker x, y, marker alpha, glow level, plan alpha); no plan -> a blank frame
     keys = []

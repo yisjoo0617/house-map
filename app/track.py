@@ -140,6 +140,19 @@ def compute_room_track(
     return {"t": times, "floor": floor, "x": x, "y": y, "alpha": alpha, "pfloor": pfloor, "panel": panel, "moves": info}
 
 
+def plan_only_track(times: np.ndarray, windows: list[tuple[float | None, float | None]], settings: dict | None = None) -> dict | None:
+    """With no room records there is no marker, but floors with a show window can still be on screen.
+    Returns a track like compute_room_track's with the marker hidden everywhere, or None if no window is set."""
+    settings = settings or {}
+    if not any(w != (None, None) for w in windows):
+        return None
+    times = np.asarray(times, dtype=float)
+    n = len(times)
+    pfloor, panel = panel_plan(times, np.full(n, -1, dtype=int), windows, float(settings.get("panel_fade_sec", 0.6)))
+    return {"t": times, "floor": np.full(n, -1, dtype=int), "x": np.zeros(n), "y": np.zeros(n), "alpha": np.zeros(n),
+            "pfloor": pfloor, "panel": panel, "moves": []}
+
+
 def panel_plan(times: np.ndarray, floor: np.ndarray, windows: list[tuple[float | None, float | None]],
                fade: float) -> tuple[np.ndarray, np.ndarray]:
     """Which plan is on screen per frame (-1 = none) and its opacity 0..1.
@@ -152,6 +165,7 @@ def panel_plan(times: np.ndarray, floor: np.ndarray, windows: list[tuple[float |
     n = len(times)
     pf = np.full(n, -1, dtype=int)
     auto = [i for i, w in enumerate(windows) if w == (None, None)] if windows else list(range(int(floor.max()) + 1))
+    auto = [i for i in auto if i >= 0]
     on_auto = np.isin(floor, auto)
     pf[on_auto] = floor[on_auto]
     best_start = np.full(n, -np.inf)

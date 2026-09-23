@@ -87,7 +87,6 @@ progress { width: 160px; vertical-align: middle; }
 #crumbName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.icon { padding: 2px 8px; border-color: transparent; background: transparent; color: var(--muted); }
 button.icon:hover { color: var(--text); border-color: var(--line); }
-.help { max-width: 980px; }
 
 /* ---------- project list ---------- */
 #listView { display: block; padding: 20px 16px 40px; max-width: 1280px; margin: 0 auto; }

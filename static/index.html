@@ -28,7 +28,7 @@
     <li>타임라인의 ◆ 기록은 드래그해서 시각을 조정할 수 있습니다. <span class="sug">주황 표시</span>는 AI가 추천한 이동 시점입니다.</li>
     <li>미리보기를 확인한 다음 <b>렌더링</b>하고 <code>overlay.mov</code>를 Premiere 영상 위 트랙의 0초 위치에 올립니다.</li>
   </ol>
-  <p>단축키: Space 재생/정지 · ←/→ 1초 · Shift+←/→ 1프레임 · 1~9 방 기록 · Del 가까운 기록 삭제</p>
+  <p>단축키: Space 재생/정지 · ←/→ 1초 · Shift+←/→ 10초 · Ctrl+←/→ 1프레임 · 1~9 방 기록 · Del 가까운 기록 삭제</p>
 </section>
 
 <main id="listView" class="hidden">
@@ -104,16 +104,16 @@
       <canvas id="overlay"></canvas>
     </div>
     <div class="transport">
+      <button data-seek="-10">-10s</button>
       <button data-seek="-1">-1s</button>
-      <button data-frame="-1">◀ 1f</button>
       <button id="playBtn" class="primary">▶ 재생</button>
-      <button data-frame="1">1f ▶</button>
       <button data-seek="1">+1s</button>
+      <button data-seek="10">+10s</button>
       <span id="timeLabel">0:00.00</span>
       <span id="flash"></span>
       <span class="spacer"></span>
       <label class="speed" title="재생 속도: 느리게 재생하며 방 이동을 확인">속도
-        <select id="speedSelect"><option value="1">1배</option><option value="0.5">0.5배</option><option value="0.25">0.25배</option></select></label>
+        <select id="speedSelect"><option value="2">2배</option><option value="1" selected>1배</option><option value="0.5">0.5배</option><option value="0.25">0.25배</option></select></label>
       <label class="chk"><input type="checkbox" id="previewToggle" checked /> 미니맵 미리보기</label>
     </div>
     <div id="roomBar"></div>
@@ -135,10 +135,11 @@
           <button data-tool="line" class="active" title="선 (L): 드래그. 수평·수직에 자동으로 맞춰지고 Alt를 누르면 자유 각도">／ 선</button>
           <button data-tool="thinline" title="얇은 선 (T): 창, 칸막이, 바닥 단차 등. 수평·수직 자동 맞춤, Alt는 자유 각도">┄ 얇은 선</button>
           <button data-tool="door" title="문 (D): 경첩 위치에서 문 끝까지 드래그. 그려진 문을 클릭하면 여는 방향이 뒤집힙니다">◜ 문</button>
-          <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그">▤ 계단</button>
-          <button data-tool="toilet" title="변기·반원 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그">◗ 변기(반원)</button>
+          <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그. 그려진 계단을 클릭하면 단 방향이 뒤집힙니다">▤ 계단</button>
+          <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (살짝 긴 반타원). 그려진 변기를 클릭하면 반대쪽으로 뒤집힙니다">◗ 변기</button>
           <button data-tool="rect" title="사각형 (R): 모서리에서 모서리로 드래그 (욕조, 세면대, 기둥 등)">▭ 사각형</button>
           <button data-tool="circle" title="원 (C): 중심에서 바깥으로 드래그">○ 원</button>
+          <button data-tool="flip" title="뒤집기 (F): 문은 여는 방향, 변기는 벽 반대쪽, 계단은 단 방향이 뒤집힙니다">⇄ 뒤집기</button>
           <button data-tool="erase" title="지우개 (E): 자동으로 잡힌 선 중 필요 없는 부분을 문질러 지웁니다">⌫ 지우개</button>
           <button data-tool="delete" title="삭제 (X): 직접 그린 선·문·계단·지우개 자국을 클릭해서 삭제">✕ 삭제</button>
           <button id="undoBtn" title="되돌리기 (Ctrl+Z)">↶ 되돌리기</button>
@@ -255,6 +256,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=11"></script>
+<script src="/static/app.js?v=15"></script>
 </body>
 </html>

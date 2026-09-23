@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from .motion import analyze_video
 from .render import (FFMPEG, DEFAULT_SETTINGS, auto_trim, build_preview, decode_plan, imwrite, load_plan, show_windows,
                      merged_settings, render_outputs, rooms_by_floor, routing, structure_alpha)
-from .track import compute_room_track
+from .track import compute_room_track, plan_only_track
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = Path(os.environ.get("HOUSEMAP_DATA", ROOT / "data"))  # tests point this elsewhere
@@ -425,10 +425,15 @@ def get_track(pid: str, fps: float = 30.0):
     fids = [f["id"] for f in proj["floors"]]
     plans = [load_plan(d / f["file"]) for f in proj["floors"]]
     edits = [f.get("edits", []) for f in proj["floors"]]
-    tr = compute_room_track(proj["rooms"], proj["events"], fids, times, s, *routing(fids, plans, s, edits),
-                            show_windows(proj["floors"]))
+    windows = show_windows(proj["floors"])
+    tr = compute_room_track(proj["rooms"], proj["events"], fids, times, s, *routing(fids, plans, s, edits), windows)
     if tr is None:
-        return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "pf": [], "pa": [], "moves": []}
+        # no records: no marker, but floors with a show window still come and go
+        tr = plan_only_track(times, windows, s)
+        if tr is None:
+            return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "pf": [], "pa": [], "moves": []}
+        return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "moves": [],
+                "pf": tr["pfloor"].tolist(), "pa": np.round(tr["panel"], 2).tolist()}
     moves = [{k: v if isinstance(v, str) else round(float(v), 2) for k, v in m.items()} for m in tr["moves"]]
     return {"fps": fps, "floor": tr["floor"].tolist(), "moves": moves,
             "x": np.round(tr["x"], 1).tolist(), "y": np.round(tr["y"], 1).tolist(),
