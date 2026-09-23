@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>House-Map 미니맵 생성기</title>
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
 <header>
@@ -118,7 +118,7 @@
     </div>
     <div id="roomBar"></div>
     <canvas id="timeline" height="64"></canvas>
-    <div class="legend">색 띠 = 방에 머문 구간 · <span class="lg-kf"></span>이동 기록(드래그 가능) · <span class="lg-sug"></span>AI 추천 시점(클릭하면 이동)</div>
+    <div class="legend">색 띠 = 방에 머문 구간 · <span class="lg-kf"></span>이동 기록(드래그 가능) · <span class="lg-mv"></span>출발→도착(마커 이동 중) · <span class="lg-sug"></span>AI 추천 시점(클릭하면 이동)</div>
   </div>
 
   <div class="col-right">
@@ -252,6 +252,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>

@@ -568,10 +568,22 @@ function renderEvents() {
         ${i > 0 ? `<select data-ev-mode="${i}" class="evmode" title="이 구간의 이동 방식">
           <option value="" ${!e.mode ? "selected" : ""}>기본 (${state.proj.settings.transition === "jump" ? "스르르" : "걸어서"})</option>
           <option value="walk" ${e.mode === "walk" ? "selected" : ""}>걸어서 이동</option>
-          <option value="jump" ${e.mode === "jump" ? "selected" : ""}>스르르 전환</option></select>` : ""}</td>
+          <option value="jump" ${e.mode === "jump" ? "selected" : ""}>스르르 전환</option></select>
+        <label class="evsec" title="이 구간만 걸리는 시간(초). 비우면 전체 설정을 따릅니다">
+          <input type="number" data-ev-sec="${i}" min="0" max="60" step="0.1" value="${e.sec ?? ""}" placeholder="${defaultSec(i)}" />초</label>` : ""}</td>
       <td>${i > 0 ? `<button data-ev-play="${i}" title="이 이동만 재생해서 확인 (앞뒤 1.5초)">▶ 이동 확인</button>` : ""}</td>
       <td><button data-ev-del="${i}" title="삭제">✕</button></td>
     </tr>`).join("") || `<tr><td colspan="3" class="muted">영상을 재생하며 숫자키를 누르거나 방을 클릭하세요</td></tr>`;
+}
+
+// what the settings would give this move, shown as the placeholder of the per-move seconds box
+function defaultSec(i) {
+  const e = state.events[i], s = state.proj.settings;
+  const mode = e.mode || (s.transition === "jump" ? "jump" : "walk");
+  if (mode === "jump") return (+s.fade_sec).toFixed(1);
+  if (s.move_timing === "time") return (+s.transition_sec).toFixed(1);
+  const m = state.track?.moves?.find((x) => Math.abs(x.t - e.t) < 0.01);
+  return m && e.sec == null && m.end > m.start ? (m.end - m.start).toFixed(1) : "자동";
 }
 
 // "2.1초 이동" under a record, with a warning when the walk had to wait for the previous one or runs past the video
@@ -609,6 +621,13 @@ $("#evTable").addEventListener("change", (e) => {
   if (md) {
     const ev = state.events[+md.dataset.evMode];
     if (md.value) ev.mode = md.value; else delete ev.mode;
+    saveRoomsEvents();
+  }
+  const sc = e.target.closest("[data-ev-sec]");
+  if (sc) {
+    const ev = state.events[+sc.dataset.evSec];
+    const v = parseFloat(sc.value);
+    if (sc.value !== "" && Number.isFinite(v) && v >= 0) ev.sec = Math.min(60, v); else delete ev.sec;
     saveRoomsEvents();
   }
 });
@@ -1092,17 +1111,23 @@ function drawOverlay() {
     const px = m.x0 + F.ox + pose.x * F.scale, py = m.y0 + F.oy + pose.y * F.scale;
     const hs = m.marker.half;
     ctx.globalAlpha = state.proj.settings.opacity * pose.a;
-    ctx.drawImage(markerSprite(m.marker, video.currentTime), px - hs - 0.5, py - hs - 0.5, 2 * hs + 1, 2 * hs + 1);
+    ctx.drawImage(markerSprite(m.marker, performance.now() / 1000), px - hs - 0.5, py - hs - 0.5, 2 * hs + 1, 2 * hs + 1);
     ctx.globalAlpha = 1;
   }
 }
 
-// glow brightness 0..1 at video time t: same curve and quantisation as the renderer, so preview == output
+// glow brightness 0..1 at time t: the renderer's curve (there it follows video time, here the wall clock,
+// so the marker keeps breathing even while the video is paused)
 function pulseLevel(mk, t) {
-  const { period, steps } = mk.pulse;
-  const lv = 0.5 - 0.5 * Math.cos((2 * Math.PI * t) / period);
-  return Math.round(lv * (steps - 1)) / (steps - 1);
+  return 0.5 - 0.5 * Math.cos((2 * Math.PI * t) / mk.pulse.period);
 }
+
+// keep the glow animating while paused (during playback loop() already redraws every frame)
+function glowLoop() {
+  if (state.proj && state.mini?.marker?.glow && video.paused && $("#previewToggle").checked) drawOverlay();
+  requestAnimationFrame(glowLoop);
+}
+requestAnimationFrame(glowLoop);
 
 // compose shadow -> glow (breathing) -> body on a scratch canvas at full alpha, then the caller fades it as one
 function markerSprite(mk, t) {
@@ -1154,6 +1179,15 @@ function drawTimeline() {
     ctx.fillStyle = "#f59e0b";
     for (const sg of state.analysis.suggestions) ctx.fillRect(X(sg.t) - 1.5 * dpr, 0, 3 * dpr, 10 * dpr);
   }
+  // when the marker is actually on the move: a strip from departure to arrival along the bottom of the bands
+  for (const m of state.track?.moves || []) {
+    if (m.end <= m.start) continue;
+    const x0 = X(m.start), x1 = X(Math.min(m.end, dur)), y = bandY + bandH - 6 * dpr, h = 6 * dpr;
+    ctx.fillStyle = m.kind === "fade" ? "rgba(139, 92, 246, .85)" : "rgba(37, 99, 235, .85)";
+    ctx.fillRect(x0, y, Math.max(x1 - x0, 2 * dpr), h);
+    ctx.fillRect(x0 - dpr, y - 3 * dpr, 2 * dpr, h + 3 * dpr);   // departure tick
+    ctx.fillRect(x1 - dpr, y - 3 * dpr, 2 * dpr, h + 3 * dpr);   // arrival tick
+  }
   for (const e of state.events) {
     const room = roomById(e.room);
     const x = X(e.t), y = bandY + bandH + 8 * dpr, r = 5 * dpr;
@@ -1203,8 +1237,10 @@ timeline.addEventListener("pointermove", (e) => {
   }
   const ev = nearest(state.events, t, r);
   const sug = state.analysis && nearest(state.analysis.suggestions, t, r);
+  const mv = state.track?.moves?.find((m) => m.end > m.start && t >= m.start && t <= m.end);
   timeline.style.cursor = ev ? "ew-resize" : "pointer";
-  timeline.title = ev ? `${fmtTime(ev.t)} → ${roomById(ev.room)?.name || ""} (드래그로 조정)` : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}` : fmtTime(t);
+  timeline.title = ev ? `${fmtTime(ev.t)} → ${roomById(ev.room)?.name || ""} (드래그로 조정)` : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
+    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} 출발 ${fmtTime(mv.start)} → 도착 ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)` : fmtTime(t);
 });
 
 timeline.addEventListener("pointerup", () => {

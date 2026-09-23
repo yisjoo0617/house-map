@@ -377,10 +377,10 @@ def _draw_text(d: ImageDraw.ImageDraw, x: float, y: float, text: str, font, fall
 
 
 # marker glow "breathing": brightness follows video time so preview and render agree
-PULSE_PERIOD = 1.6        # seconds per bright-dim-bright cycle
-PULSE_MIN = 0.18          # dimmest glow as a fraction of the brightest
-PULSE_STEPS = 8           # distinct brightness levels (keeps the overlay frame cache small)
-PULSE_GLOW_MAX = 0.7      # peak glow alpha at the marker centre
+PULSE_PERIOD = 1.2        # seconds per bright-dim-bright cycle
+PULSE_MIN = 0.08          # dimmest glow as a fraction of the brightest
+PULSE_STEPS = 12          # distinct brightness levels (keeps the overlay frame cache small)
+PULSE_GLOW_MAX = 0.55     # peak glow alpha right at the dot edge (kept below the dot so it stays in front)
 
 
 def pulse_level(t: float) -> float:
@@ -558,23 +558,22 @@ class Minimap:
         s = self.s
         r = 0.036 * wp * float(s["marker_size"])
         glow = s["glow"]
-        half = int(math.ceil(r * (4.2 if glow else 1.3)))
+        half = int(math.ceil(r * (1.6 if glow else 0.8)))
         ss = 4
         n = (2 * half + 1) * ss
         yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
         d = np.hypot(xx - n / 2, yy - n / 2) / ss
         color = np.array(hex_bgr(s["marker_color"]), np.float32)
 
-        a_glow = (np.exp(-((d / (1.9 * r)) ** 2)) if glow else np.zeros_like(d)).astype(np.float32)
-        # body: filled disc with ONE thin dark ring inside -> outer ring / dark line / centre dot
-        a_disc = np.clip(r - d + 0.5, 0, 1).astype(np.float32)
-        a_ring = np.clip(0.60 * r - d + 0.5, 0, 1) * np.clip(d - 0.46 * r + 0.5, 0, 1)
-        ink = np.array((36, 36, 40), np.float32)
+        # body: one small filled dot; the glow is a soft ring hugging its edge (only the rim sparkles)
+        rd = 0.6 * r
+        # full strength up to the dot's edge, then fades outward -> the dot always sits crisply on top
+        a_glow = (np.exp(-((np.maximum(d - 1.02 * rd, 0) / (0.45 * rd)) ** 2)) if glow else np.zeros_like(d)).astype(np.float32)
+        a_disc = np.clip(rd - d + 0.5, 0, 1).astype(np.float32)
         body = np.broadcast_to(color, (n, n, 3)).copy()
-        body = body * (1 - 0.85 * a_ring[..., None]) + ink * (0.85 * a_ring[..., None])
         # dark rim under the glow, only as strong as the board is see-through
         shadow_k = 0.55 * (1 - float(s["panel_opacity"]))
-        a_shadow = (shadow_k * np.clip((1.45 * r - d) / (0.45 * r), 0, 1)).astype(np.float32)
+        a_shadow = (0.6 * shadow_k * np.clip((1.3 * rd - d) / (0.3 * rd), 0, 1)).astype(np.float32)
 
         size = (2 * half + 1, 2 * half + 1)
 

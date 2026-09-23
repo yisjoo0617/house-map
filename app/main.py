@@ -272,9 +272,11 @@ def update_project(pid: str, body: ProjectUpdate):
     room_ids = {r["id"] for r in proj["rooms"]}
     if body.events is not None:
         try:
-            # "mode" overrides the default transition for this one room change
+            # "mode" / "sec" override the default transition / duration for this one room change
             evs = [{"t": round(float(e["t"]), 3), "room": str(e["room"]),
-                    **({"mode": e["mode"]} if e.get("mode") in ("walk", "jump") else {})} for e in body.events]
+                    **({"mode": e["mode"]} if e.get("mode") in ("walk", "jump") else {}),
+                    **({"sec": round(min(60.0, max(0.0, float(e["sec"]))), 2)} if e.get("sec") not in (None, "") else {})}
+                   for e in body.events]
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "잘못된 이동 기록입니다")
         proj["events"] = sorted(evs, key=lambda e: e["t"])

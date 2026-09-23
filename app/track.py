@@ -59,10 +59,13 @@ def plan_moves(rooms: list[dict], events: list[dict], floor_ids: list[str], sett
         same_floor = a["floor"] == b["floor"]
         mode = evs[i].get("mode") or ("walk" if settings.get("transition", "slide") == "slide" else "jump")
         kind = "walk" if (mode == "walk" and same_floor) else "fade"
+        own = evs[i].get("sec")  # this one move's duration, set in the record table (None = follow the settings)
         if kind == "walk":
             poly = np.asarray(router(a["floor"], pa, pb) if router else [pa, pb], float)
             length = float(np.linalg.norm(np.diff(poly, axis=0), axis=1).sum())
-            if settings.get("move_timing", "speed") == "speed":
+            if own is not None:
+                dur = max(0.0, float(own))
+            elif settings.get("move_timing", "speed") == "speed":
                 # speed is set as "seconds to walk across the whole plan", so it means the same on any plan
                 long_side = (floor_sizes or {}).get(a["floor"]) or 1000.0
                 speed = long_side / max(0.2, float(settings.get("cross_sec", 4.0)))  # plan px / s
@@ -70,7 +73,8 @@ def plan_moves(rooms: list[dict], events: list[dict], floor_ids: list[str], sett
             else:
                 dur = float(settings.get("transition_sec", 0.8))
         else:
-            poly, dur = np.asarray([pa, pb], float), max(0.0, float(settings.get("fade_sec", 0.6)))
+            poly = np.asarray([pa, pb], float)
+            dur = max(0.0, float(own if own is not None else settings.get("fade_sec", 0.6)))
 
         anchor = settings.get("move_anchor", "center")
         start = t - dur / 2 if anchor == "center" else t if anchor == "start" else t - dur
