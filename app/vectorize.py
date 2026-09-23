@@ -297,30 +297,39 @@ def detect_windows(walls: list[dict], doors: list[dict], ref: float, W: int) -> 
     for horiz in (True, False):
         a, b = ("x", "y") if horiz else ("y", "x")
         for line in ((y_lo, y_hi) if horiz else (x_lo, x_hi)):
-            spans = []   # (start, end, across) intervals covered along this side
+            spans = []   # (start, end, across, is a wall lying on this side) intervals covered along this side
             for s in walls:
                 if s.get("diag"):
                     continue
                 if s["horiz"] == horiz and abs(s[b + "0"] - line) <= edge:
                     lo, hi = sorted((s[a + "0"], s[a + "1"]))
-                    spans.append((lo, hi, s[b + "0"]))
+                    spans.append((lo, hi, s[b + "0"], True))
                 elif s["horiz"] != horiz:
                     for end in ("0", "1"):
                         if abs(s[b + end] - line) <= edge:      # a perpendicular wall reaches this side
-                            spans.append((s[a + end], s[a + end], s[b + end]))
+                            spans.append((s[a + end], s[a + end], s[b + end], False))
             spans.sort()
-            reach, reach_c = None, None
-            for lo, hi, c in spans:
+            reach, reach_c, reach_wall = None, None, False
+            for lo, hi, c, is_wall in spans:
                 if reach is not None and lo - reach > 1.0 * ref and lo - reach <= 0.8 * W and abs(c - reach_c) <= 1.0 * ref:
-                    cc = (c + reach_c) / 2
+                    # the window sits on the wall's own centre line; a perpendicular wall's end may overshoot
+                    # the outline by half a thickness and must not pull the window line outward
+                    cc = c if is_wall and not reach_wall else reach_c if reach_wall and not is_wall else (c + reach_c) / 2
                     p0 = (reach, cc) if horiz else (cc, reach)
                     p1 = (lo, cc) if horiz else (cc, lo)
                     if not any(math.hypot(hx - q[0], hy - q[1]) <= 1.5 * ref for hx, hy in hinges for q in (p0, p1)):
                         out.append({"horiz": horiz, "t": 1.0, "len": lo - reach, "cv": 0.0,
                                     "x0": p0[0], "y0": p0[1], "x1": p1[0], "y1": p1[1]})
                 if reach is None or hi > reach:
-                    reach, reach_c = hi, c
+                    reach, reach_c, reach_wall = hi, c, is_wall
     return out
+
+
+def _trim_overshoot(walls: list[dict], windows: list[dict], ref: float) -> None:
+    """A wall end that pokes past the plan's outline where a window bridges the gap (no perpendicular wall
+    there to snap to) is pulled back onto the window line, so nothing sticks out of the outer border."""
+    if windows:
+        _snap_corners(walls, windows, tol=1.5 * ref)
 
 
 # ---------- stairs ----------
@@ -530,11 +539,13 @@ def auto_edits(plan: np.ndarray, settings: dict, kinds=AUTO_KINDS) -> list[dict]
     lines = _local_lines(gray, W)
     doors = detect_doors(lines, walls, wall_mask, ref, W) if "doors" in kinds else []
     out: list[dict] = []
+    thin = detect_thin(dark, walls, wall_mask, ref, W) if "thin" in kinds else []
+    windows = detect_windows(walls, doors, ref, W)
+    _trim_overshoot(walls, windows, ref)
     if "walls" in kinds:
         out += [_line_edit(s, k) for s in walls]
     if "thin" in kinds:
-        out += [_line_edit(s, k, thin=True) for s in detect_thin(dark, walls, wall_mask, ref, W)]
-        out += [_line_edit(s, k, thin=True) for s in detect_windows(walls, doors, ref, W)]
+        out += [_line_edit(s, k, thin=True) for s in thin + windows]
     for d in doors:
         out.append({"type": "door", "hinge": [round(d["hx"] / k, 1), round(d["hy"] / k, 1)],
                     "end": [round(d["ex"] / k, 1), round(d["ey"] / k, 1)], "flip": d["flip"], "auto": True})

@@ -561,8 +561,8 @@ class Minimap:
             fit_xy = (ox - crop[0] * sc, oy - crop[1] * sc, sc)
             self.fits.append(fit_xy)
 
-            # layers: background board -> soft shadow -> lines & text. Lines/text keep their own
-            # opacity, so a see-through background (panel_opacity 0) still shows the plan.
+            # layers: background board -> lines & text. Lines/text keep their own opacity, so a
+            # see-through background (panel_opacity 0) still shows the plan (with no halo around the lines).
             img = bg.copy()
             alpha = mask * float(s["panel_opacity"])
             content = np.zeros((H, W), np.float32)
@@ -580,14 +580,6 @@ class Minimap:
             if s["show_room_names"]:
                 self._room_names(text_a, floor_rooms, fit_xy, L, (oy, oy + ih))
             content = np.maximum(content, text_a) * noise
-
-            # the more see-through the board, the stronger a dark halo keeps white lines readable on bright footage
-            shadow_k = 0.6 * (1 - float(s["panel_opacity"]))
-            if shadow_k > 0.02:
-                r = max(1, int(round(line_px * 1.2)))
-                sh = cv2.dilate(content, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
-                sh = cv2.GaussianBlur(sh, (0, 0), max(1.0, line_px))
-                img, alpha = _over(img, alpha, np.zeros(3, np.float32), np.clip(sh * shadow_k, 0, 1))
             img, alpha = _over(img, alpha, line, content)
             self.bases.append(np.clip(img, 0, 255).astype(np.uint8))
             self.alphas.append((alpha * mask * float(s["opacity"])).astype(np.float32))
@@ -627,7 +619,7 @@ class Minimap:
         return np.asarray(layer, np.float32) / 255
 
     def _room_names(self, layer: np.ndarray, rooms: list[dict], fit: tuple, L: dict, plan_y: tuple[int, int]) -> None:
-        """Room names centred just under each room point (where the marker rests)."""
+        """Room names centred just above each room point (where the marker rests)."""
         if not rooms:
             return
         H, W = layer.shape
@@ -642,9 +634,9 @@ class Minimap:
             if not r.get("name"):
                 continue
             x, y = ox + float(r["x"]) * sc, oy + float(r["y"]) * sc
-            base = y + gap + px * 0.75
-            if base > plan_y[1] + px * 0.2:  # no room below the point: put it above
-                base = y - gap - px * 0.15
+            base = y - gap - px * 0.15          # baseline just above the point
+            if base - px * 0.75 < plan_y[0] - px * 0.2:  # no room above the point: put it below
+                base = y + gap + px * 0.75
             _draw_text(d, x, base, r["name"], font, fallback, "m", 255)
         layer[:] = np.maximum(layer, np.asarray(img, np.float32) / 255)
 

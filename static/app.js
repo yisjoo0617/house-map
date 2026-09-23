@@ -659,11 +659,38 @@ function bendableMoves() {
   return state.events.filter((e, i) => canBend(i) && roomById(e.room).floor === state.viewFloor);
 }
 
+// ---- undo for route bending: snapshots of every move's bend points, keyed by the record (time + room)
+// so unrelated changes in between (a new record, a renamed room) are left alone ----
+
+state.routeUndo = [];
+const routeKey = (e) => `${e.t}|${e.room}`;
+
+function pushRouteUndo() {
+  state.routeUndo.push(state.events.map((e) => [routeKey(e), e.via ? JSON.stringify(e.via) : null]));
+  if (state.routeUndo.length > 100) state.routeUndo.shift();
+  $("#routeUndoBtn").disabled = false;
+}
+
+function undoRoute() {
+  const last = state.routeUndo.pop();
+  $("#routeUndoBtn").disabled = !state.routeUndo.length;
+  if (!last) return;
+  const snap = new Map(last);
+  for (const e of state.events) {
+    if (!snap.has(routeKey(e))) continue;
+    const via = snap.get(routeKey(e));
+    if (via) e.via = JSON.parse(via); else delete e.via;
+  }
+  saveRoomsEvents();
+  flash("경로 되돌리기");
+}
+$("#routeUndoBtn").addEventListener("click", undoRoute);
+
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 (삭제·옮기기·뒤집기 가능) · 파란 선 = 직접 그린 것 · 잘못 잡힌 것은 삭제(X)나 지우개로, 빠진 것은 도구로 그리세요 · Ctrl+드래그 = 도형 옮기기 · Ctrl+Shift+드래그 = 복사해서 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 (삭제·옮기기·뒤집기 가능) · 파란 선 = 직접 그린 것 · 잘못 잡힌 것은 삭제(X)나 지우개로, 빠진 것은 도구로 그리세요 · Ctrl+드래그 = 도형 옮기기 · Shift+드래그 = 끝점·모서리 크기 조절 · Ctrl+Shift+드래그 = 복사해서 옮기기"
     : state.mode === "route"
-      ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 직선으로 되돌리기"
+      ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
 }
 
@@ -737,9 +764,9 @@ $("#evTable").addEventListener("click", (e) => {
   const pl = e.target.closest("[data-ev-play]");
   if (pl) playAround(state.events[+pl.dataset.evPlay].t);
   const rc = e.target.closest("[data-ev-route-clear]");
-  if (rc) {
+  if (rc) {   // straight away, no confirmation: Ctrl+Z (or ↶ in ② 경로 꺾기) brings the bends back
     const ev = state.events[+rc.dataset.evRouteClear];
-    if (ev.via?.length && confirm(`이 구간의 꺾은 점 ${ev.via.length}개를 지우고 직선으로 되돌릴까요?`)) { delete ev.via; saveRoomsEvents(); flash("경로 초기화"); }
+    if (ev.via?.length) { pushRouteUndo(); delete ev.via; saveRoomsEvents(); flash("경로 초기화 · Ctrl+Z로 되돌리기"); }
   }
   const d = e.target.closest("[data-ev-del]");
   if (d) { state.events.splice(+d.dataset.evDel, 1); saveRoomsEvents(); }
@@ -769,8 +796,10 @@ function planScale() { return planCv.width / viewImg().width; }
 
 function planPoint(e) {
   const r = planCv.getBoundingClientRect();
-  const k = viewImg().width / r.width;
-  return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
+  const img = viewImg();
+  const k = img.width / r.width;
+  // a drag that leaves the canvas (pointer capture keeps it alive) stays inside the plan image
+  return { x: Math.max(0, Math.min(img.width, (e.clientX - r.left) * k)), y: Math.max(0, Math.min(img.height, (e.clientY - r.top) * k)) };
 }
 
 function hitRoom(p) {
@@ -793,11 +822,13 @@ planCv.addEventListener("pointerdown", (e) => {
     const h = hitVia(p);
     if (h) {
       planCv.setPointerCapture(e.pointerId);
+      pushRouteUndo();   // dropped again on pointerup if the point did not move
       state.drag = { via: h.k, ev: h.ev, start: p, moved: false };
       return;
     }
     if (hitRoom(p)) return;   // a room point is never a bend
-    if (insertVia(p)) saveRoomsEvents();
+    pushRouteUndo();
+    if (insertVia(p)) saveRoomsEvents(); else state.routeUndo.pop();
     return;
   }
   const hit = hitRoom(p);
@@ -806,13 +837,47 @@ planCv.addEventListener("pointerdown", (e) => {
     state.drag = { room: hit, start: p, moved: false };
     return;
   }
-  const name = prompt("방 이름 (예: Living Room, Kitchen, Bedroom)", suggestRoomName());
-  if (name === null) return;
-  const room = { id: "r" + Math.random().toString(36).slice(2, 8), name: name.trim(), floor: state.viewFloor, x: p.x, y: p.y };
+  openRoomDialog(p);
+});
+
+// ---- "방 추가" dialog: a name box plus example names that fill it when clicked ----
+
+let pendingRoomPoint = null;
+function openRoomDialog(p) {
+  pendingRoomPoint = p;
+  const inp = $("#roomNameInput");
+  inp.value = suggestRoomName();
+  $("#roomChips").innerHTML = ROOM_NAME_EXAMPLES.map((n) =>
+    `<button type="button" data-chip="${escapeHtml(n)}" class="${state.rooms.some((r) => r.name === n) ? "used" : ""}">${escapeHtml(n)}</button>`).join("");
+  $("#roomDialog").showModal();
+  inp.focus();
+  inp.select();
+}
+$("#roomChips").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-chip]");
+  if (!b) return;
+  const inp = $("#roomNameInput");
+  inp.value = b.dataset.chip;
+  inp.focus();
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+});
+$("#roomForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const p = pendingRoomPoint;
+  pendingRoomPoint = null;
+  $("#roomDialog").close();
+  if (!p || !state.proj) return;
+  addRoom($("#roomNameInput").value.trim(), p);
+});
+$("#roomDialog").addEventListener("close", () => { pendingRoomPoint = null; });
+
+function addRoom(name, p) {
+  const room = { id: "r" + Math.random().toString(36).slice(2, 8), name, floor: state.viewFloor, x: p.x, y: p.y };
   state.rooms.push(room);
   if (!state.events.length) state.events.push({ t: 0, room: room.id }); // first room = starting room
   saveRoomsEvents();
-});
+  return room;
+}
 
 planCv.addEventListener("pointermove", (e) => {
   if (state.mode === "draw") return drawMove(e);
@@ -831,7 +896,7 @@ planCv.addEventListener("pointerup", (e) => {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
-  if (d.via != null) { if (d.moved) saveRoomsEvents(); return; }
+  if (d.via != null) { if (d.moved) saveRoomsEvents(); else state.routeUndo.pop(); return; }
   if (d.moved) saveRoomsEvents();
   else recordRoom(d.room);
 });
@@ -841,16 +906,17 @@ planCv.addEventListener("contextmenu", (e) => {
   if (state.mode === "draw") return;
   if (state.mode === "route") {
     const h = hitVia(planPoint(e));
-    if (h) { h.ev.via.splice(h.k, 1); if (!h.ev.via.length) delete h.ev.via; saveRoomsEvents(); }
+    if (h) { pushRouteUndo(); h.ev.via.splice(h.k, 1); if (!h.ev.via.length) delete h.ev.via; saveRoomsEvents(); }
     return;
   }
   const hit = hitRoom(planPoint(e));
   if (hit) deleteRoom(hit);
 });
 
+const ROOM_NAME_EXAMPLES = ["Living Room", "Kitchen", "Room", "Bathroom", "Terrace"];
+
 function suggestRoomName() {
-  const names = ["Entrance", "Living Room", "Kitchen", "Bedroom", "Bathroom", "Pantry", "Dressing Room", "Utility Room", "Balcony", "Study"];
-  return names.find((n) => !state.rooms.some((r) => r.name === n)) || "";
+  return ROOM_NAME_EXAMPLES.find((n) => !state.rooms.some((r) => r.name === n)) || "";
 }
 
 // one CSS pixel, in plan units
@@ -880,6 +946,8 @@ function setMode(mode) {
   state.mode = mode;
   for (const b of $$("[data-mode]")) b.classList.toggle("active", b.dataset.mode === mode);
   $("#drawBar").classList.toggle("hidden", mode !== "draw");
+  $("#routeBar").classList.toggle("hidden", mode !== "route");
+  $("#routeUndoBtn").disabled = !state.routeUndo.length;
   updatePlanHint();
   planCv.style.cursor = mode === "rooms" ? "" : "crosshair";
   if (mode === "draw") loadStruct();
@@ -954,10 +1022,11 @@ function saveEdits(erased = false) {
   }, 300);
 }
 
-function snapPoint(p, from, free) {
+function snapPoint(p, from, free, skip = null) {
   // snap to existing endpoints first, then keep lines horizontal / vertical
   const tol = 9 * cssPx();
   for (const e of curEdits()) {
+    if (e === skip) continue;
     const ends = e.type === "line" ? [e.pts[0], e.pts[e.pts.length - 1]] : e.type === "door" ? [e.hinge, e.end] : [];
     for (const q of ends) if (Math.hypot(q[0] - p.x, q[1] - p.y) < tol) return { x: q[0], y: q[1] };
   }
@@ -968,6 +1037,44 @@ function snapPoint(p, from, free) {
     if (Math.abs(ang - 90) < 10) return { x: from.x, y: p.y };
   }
   return p;
+}
+
+// crossing point of segments p-q and a-b (a and b as [x, y]), or null when they don't cross
+function segCross(p, q, a, b) {
+  const rx = q.x - p.x, ry = q.y - p.y, sx = b[0] - a[0], sy = b[1] - a[1];
+  const den = rx * sy - ry * sx;
+  if (Math.abs(den) < 1e-9) return null;
+  const t = ((a[0] - p.x) * sy - (a[1] - p.y) * sx) / den;
+  const u = ((a[0] - p.x) * ry - (a[1] - p.y) * rx) / den;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: p.x + t * rx, y: p.y + t * ry };
+}
+
+// A line drawn to a wall stops exactly on it: an end that runs a little past the wall (or falls a
+// little short of it) is moved onto the crossing, so nothing pokes out of the plan's outline.
+function clipToWalls(start, end) {
+  const tol = 12 * cssPx();
+  const len = Math.hypot(end.x - start.x, end.y - start.y);
+  if (len < 1e-6) return [start, end];
+  const ux = (end.x - start.x) / len, uy = (end.y - start.y) / len;
+  const walls = curEdits().filter((e) => e.type === "line").flatMap(editSegments);
+  // the plan's outline: an end outside it always comes back to the outer wall it crossed
+  const xs = walls.flatMap(([a, b]) => [a[0], b[0]]), ys = walls.flatMap(([a, b]) => [a[1], b[1]]);
+  const outside = (q) => xs.length && (q.x < Math.min(...xs) || q.x > Math.max(...xs) || q.y < Math.min(...ys) || q.y > Math.max(...ys));
+  const clip = (from, to, dir) => {   // `to` slides along the line onto the nearest wall crossing within tol
+    const far = { x: to.x + dir * ux * tol, y: to.y + dir * uy * tol };
+    let best = null, bd = outside(to) ? Infinity : tol;
+    for (const [a, b] of walls) {
+      const q = segCross(from, far, a, b);
+      if (!q) continue;
+      const d = Math.hypot(q.x - to.x, q.y - to.y);
+      if (d < bd && Math.hypot(q.x - from.x, q.y - from.y) > tol) { bd = d; best = q; }
+    }
+    return best || to;
+  };
+  const e2 = clip(start, end, 1);
+  const s2 = clip(e2, start, -1);
+  return [s2, e2];
 }
 
 // Ctrl (or ⌘) + drag moves any drawn item as a whole
@@ -982,8 +1089,100 @@ function translateEdit(e, dx, dy) {
 function moveCursor(e, p) {
   if (state.drawing) return;
   const over = p && hitEdit(p, null, true);
+  if (p && resizeGesture(e)) {   // resize: a handle under the pointer, or the nearest handle of the shape under it
+    planCv.style.cursor = hitHandle(p) || hitEdit(p, SHAPE_TYPES, true) ? "nwse-resize" : "crosshair";
+    return;
+  }
   planCv.style.cursor = state.tool === "copy" ? (over ? "copy" : "crosshair")
     : (e.ctrlKey || e.metaKey) && over ? "grab" : "crosshair";
+}
+
+// ---- resize: drag an endpoint / corner / side of a drawn item (resize tool, or Shift+drag with any tool) ----
+
+const SHAPE_TYPES = ["line", "door", "stairs", "toilet", "rect", "circle", "basin", "sink", "induction", "closet"];
+const resizeGesture = (e) => state.tool === "resize" || (e.shiftKey && !e.ctrlKey && !e.metaKey);
+
+// handles of a drawn item: [{pt, set(p, alt)}]. The geometry is captured when the handles are made
+// (at the start of a drag), so a corner dragged past the opposite one simply turns the box inside out.
+function editHandles(e) {
+  const H = [];
+  const P = (q) => ({ x: q[0], y: q[1] });
+  if (e.type === "line") {
+    e.pts.forEach((q, i) => H.push({ pt: q, set: (p, alt) => {
+      const other = e.pts.length === 2 ? P(e.pts[1 - i]) : null;   // a two-point line stays horizontal / vertical
+      const s = snapPoint(p, other, alt || !other, e);
+      e.pts[i] = [s.x, s.y];
+    } }));
+  } else if (e.type === "door") {
+    for (const [k, other] of [["hinge", "end"], ["end", "hinge"]]) {
+      H.push({ pt: e[k], set: (p, alt) => { const s = snapPoint(p, P(e[other]), alt, e); e[k] = [s.x, s.y]; } });
+    }
+  } else if (e.type === "toilet") {
+    for (const k of ["a", "b"]) H.push({ pt: e[k], set: (p) => { e[k] = [p.x, p.y]; } });
+  } else if (e.type === "circle") {
+    for (const t of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+      H.push({ pt: [e.c[0] + e.r * Math.cos(t), e.c[1] + e.r * Math.sin(t)],
+        set: (p) => { e.r = Math.max(1, Math.hypot(p.x - e.c[0], p.y - e.c[1])); } });
+    }
+  } else if (e.type === "rect" || e.type === "stairs" || FIXTURES.includes(e.type)) {
+    const box = [Math.min(e.a[0], e.b[0]), Math.min(e.a[1], e.b[1]), Math.max(e.a[0], e.b[0]), Math.max(e.a[1], e.b[1])];
+    const setBox = (b) => { e.a = [Math.min(b[0], b[2]), Math.min(b[1], b[3])]; e.b = [Math.max(b[0], b[2]), Math.max(b[1], b[3])]; };
+    for (const [ix, iy] of [[0, 1], [2, 1], [2, 3], [0, 3]]) {   // corners
+      H.push({ pt: [box[ix], box[iy]], set: (p) => { const s = snapPoint(p, null, true, e); const b = [...box]; b[ix] = s.x; b[iy] = s.y; setBox(b); } });
+    }
+    for (const [i, pt] of [[1, [(box[0] + box[2]) / 2, box[1]]], [2, [box[2], (box[1] + box[3]) / 2]],
+                           [3, [(box[0] + box[2]) / 2, box[3]]], [0, [box[0], (box[1] + box[3]) / 2]]]) {   // sides
+      H.push({ pt, set: (p) => { const b = [...box]; b[i] = i % 2 ? p.y : p.x; setBox(b); } });
+    }
+  }
+  return H;
+}
+
+// the handle under the pointer, of any item on this floor: {e, h} or null
+function hitHandle(p, tol = 10 * cssPx()) {
+  let best = null, bd = tol;
+  for (const e of curEdits()) {
+    if (!SHAPE_TYPES.includes(e.type)) continue;
+    for (const h of editHandles(e)) {
+      const d = Math.hypot(h.pt[0] - p.x, h.pt[1] - p.y);
+      if (d < bd) { bd = d; best = { e, h }; }
+    }
+  }
+  return best;
+}
+
+// a handle to drag from point p: the one under the pointer, else the nearest handle of the item under it
+function resizeTarget(p) {
+  const hh = hitHandle(p);
+  if (hh) return hh;
+  const e = hitEdit(p, SHAPE_TYPES, true);
+  if (!e) return null;
+  let best = null, bd = Infinity;
+  for (const h of editHandles(e)) {
+    const d = Math.hypot(h.pt[0] - p.x, h.pt[1] - p.y);
+    if (d < bd) { bd = d; best = h; }
+  }
+  return best && { e, h: best };
+}
+
+function startResize(p, target) {
+  pushUndo();
+  state.drawing = { type: "resize", target: target.e, handle: target.h, moved: false };
+  planCv.style.cursor = "nwse-resize";
+}
+
+function drawHandles(ctx, e, u, active = null) {
+  const s = 3.5 * u;
+  ctx.lineWidth = 1.5 * u;
+  for (const h of editHandles(e)) {
+    const on = active && h.pt[0] === active.pt[0] && h.pt[1] === active.pt[1];
+    ctx.fillStyle = on ? "#2563eb" : "#fff";
+    ctx.strokeStyle = "#2563eb";
+    ctx.beginPath();
+    ctx.rect(h.pt[0] - s, h.pt[1] - s, 2 * s, 2 * s);
+    ctx.fill();
+    ctx.stroke();
+  }
 }
 
 // a copy of a drawn item, added to the floor; copies count as hand-drawn even when the original was automatic
@@ -1010,6 +1209,11 @@ function drawDown(e) {
     if (hit) startMove(p, hit, e.shiftKey);
     return;
   }
+  if (resizeGesture(e)) {   // resize tool, or Shift+drag with any tool
+    const target = resizeTarget(p);
+    if (target) { startResize(p, target); return; }
+    if (t === "resize") return;   // Shift over empty space with another tool: draw as usual
+  }
   if (t === "copy") {
     const hit = hitEdit(p, null, true);
     if (hit) startMove(p, hit, true);
@@ -1029,7 +1233,7 @@ function drawDown(e) {
   const s = t === "erase" ? p : snapPoint(p, null, e.altKey);
   const r = (+$("#eraseSize").value) * cssPx();
   state.drawing = t === "erase" ? { type: "erase", pts: [[s.x, s.y]], r }
-    : { type: t, start: s, end: s };
+    : { type: t, start: s, end: s, start0: s };
   drawPlan();
 }
 
@@ -1037,7 +1241,13 @@ function drawMove(e) {
   const d = state.drawing;
   const p = planPoint(e);
   state.hover = p;
-  if (!d) { moveCursor(e, p); if (state.tool === "erase") drawPlan(); return; }
+  if (!d) { moveCursor(e, p); if (state.tool === "erase" || resizeGesture(e)) drawPlan(); return; }
+  if (d.type === "resize") {
+    d.handle.set(p, e.altKey);
+    d.moved = true;
+    drawPlan();
+    return;
+  }
   if (d.type === "move") {
     translateEdit(d.target, p.x - d.last.x, p.y - d.last.y);
     d.last = p;
@@ -1045,8 +1255,17 @@ function drawMove(e) {
     drawPlan();
     return;
   }
+  if (d.type === "flip" && state.tool !== "flip" && Math.hypot(p.x - d.start.x, p.y - d.start.y) > 4 * cssPx()) {
+    // pressed on an existing door / stairs / toilet but dragging: draw a new one from there (a flight of
+    // stairs often continues from the edge of the previous one); only a plain click flips
+    d.type = state.tool;
+    d.start = d.start0 = snapPoint(d.start, null, e.altKey);
+    d.end = p;
+    delete d.target;
+  }
   if (d.type === "erase") d.pts.push([p.x, p.y]);
-  else if (d.type !== "flip") d.end = (d.type === "line" || d.type === "thinline") ? snapPoint(p, d.start, e.altKey) : p;
+  else if (d.type === "line" || d.type === "thinline") [d.start, d.end] = clipToWalls(d.start0, snapPoint(p, d.start0, e.altKey));
+  else if (d.type !== "flip") d.end = p;
   drawPlan();
 }
 
@@ -1054,6 +1273,11 @@ function drawUp() {
   const d = state.drawing;
   state.drawing = null;
   if (!d) return;
+  if (d.type === "resize") {
+    if (d.moved) saveEdits();
+    else { state.undo.pop(); drawPlan(); }
+    return;
+  }
   if (d.type === "move") {
     planCv.style.cursor = state.tool === "copy" ? "copy" : "grab";
     if (d.moved) saveEdits(d.target.type === "erase");
@@ -1315,7 +1539,13 @@ function drawEditsLayer(ctx, u) {
       ctx.stroke();
     }
   }
-  if (d && d.type !== "flip" && d.type !== "move") {
+  // resize handles: on the item being resized, or the one under the pointer while the gesture is available
+  if (d?.type === "resize") drawHandles(ctx, d.target, u, d.handle);
+  else if (!d && state.hover && (state.tool === "resize" || state.shiftDown)) {
+    const t = resizeTarget(state.hover);
+    if (t) drawHandles(ctx, t.e, u, hitHandle(state.hover)?.h);
+  }
+  if (d && d.type !== "flip" && d.type !== "move" && d.type !== "resize") {
     if (d.type === "erase") {
       // nothing to draw: the ink layer above already shows the stroke wiping the lines
     } else {
@@ -1426,9 +1656,9 @@ function drawPlan() {
     ctx.font = `bold ${12 * u}px sans-serif`;
     ctx.lineWidth = 3 * u;
     ctx.strokeStyle = "rgba(255,255,255,.9)";
-    ctx.strokeText(r.name, r.x, r.y + 20 * u);
+    ctx.strokeText(r.name, r.x, r.y - 19 * u);   // just above the point, as in the minimap
     ctx.fillStyle = col;
-    ctx.fillText(r.name, r.x, r.y + 20 * u);
+    ctx.fillText(r.name, r.x, r.y - 19 * u);
   });
 
   const pose = poseAt(video.currentTime);
@@ -1712,11 +1942,13 @@ function loop() {
 }
 
 const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle",
-  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyV: "copy", KeyE: "erase", KeyX: "delete" };
+  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyV: "copy", KeyA: "resize", KeyE: "erase", KeyX: "delete" };
 
 for (const ev of ["keydown", "keyup"]) document.addEventListener(ev, (e) => {
-  if ((e.key === "Control" || e.key === "Meta") && state.mode === "draw") moveCursor(e, state.hover);
+  if (e.key === "Shift") state.shiftDown = e.shiftKey;
+  if (["Control", "Meta", "Shift"].includes(e.key) && state.mode === "draw") { moveCursor(e, state.hover); drawPlan(); }
 });
+window.addEventListener("blur", () => { state.shiftDown = false; });
 
 document.addEventListener("keydown", (e) => {
   // typing fields keep their keys; checkboxes / sliders / colour pickers don't block shortcuts
@@ -1734,6 +1966,10 @@ document.addEventListener("keydown", (e) => {
       return;
     }
     if (e.code === "Delete" || e.code === "Backspace") return;
+  } else if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") {   // ① / ②: undo route bending (also the 초기화 button)
+    e.preventDefault();
+    undoRoute();
+    return;
   }
   if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
   else if (e.code === "ArrowLeft") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(-1); else video.currentTime -= e.shiftKey ? 1 : 10; }
