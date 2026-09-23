@@ -661,7 +661,7 @@ function bendableMoves() {
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 (삭제·옮기기·뒤집기 가능) · 파란 선 = 직접 그린 것 · 잘못 잡힌 것은 삭제(X)나 지우개로, 빠진 것은 도구로 그리세요 · Ctrl+드래그 = 도형 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 (삭제·옮기기·뒤집기 가능) · 파란 선 = 직접 그린 것 · 잘못 잡힌 것은 삭제(X)나 지우개로, 빠진 것은 도구로 그리세요 · Ctrl+드래그 = 도형 옮기기 · Ctrl+Shift+드래그 = 복사해서 옮기기"
     : state.mode === "route"
       ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 직선으로 되돌리기"
       : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
@@ -980,16 +980,38 @@ function translateEdit(e, dx, dy) {
 
 function moveCursor(e, p) {
   if (state.drawing) return;
-  planCv.style.cursor = (e.ctrlKey || e.metaKey) && p && hitEdit(p, null, true) ? "grab" : "crosshair";
+  const over = p && hitEdit(p, null, true);
+  planCv.style.cursor = state.tool === "copy" ? (over ? "copy" : "crosshair")
+    : (e.ctrlKey || e.metaKey) && over ? "grab" : "crosshair";
+}
+
+// a copy of a drawn item, added to the floor; copies count as hand-drawn even when the original was automatic
+function duplicateEdit(e) {
+  const c = JSON.parse(JSON.stringify(e));
+  delete c.auto;
+  curEdits().push(c);
+  return c;
+}
+
+// start dragging `target` (a fresh copy when `copy` is set); a click without movement just offsets the copy
+function startMove(p, target, copy) {
+  pushUndo();
+  state.drawing = { type: "move", target: copy ? duplicateEdit(target) : target, last: p, moved: false, copy };
+  planCv.style.cursor = "grabbing";
 }
 
 function drawDown(e) {
   const p = planPoint(e);
   planCv.setPointerCapture(e.pointerId);
   const t = state.tool;
-  if (e.ctrlKey || e.metaKey) {
+  if (e.ctrlKey || e.metaKey) {   // Ctrl+drag moves, Ctrl+Shift+drag drags a copy
     const hit = hitEdit(p, null, true);
-    if (hit) { pushUndo(); state.drawing = { type: "move", target: hit, last: p, moved: false }; planCv.style.cursor = "grabbing"; }
+    if (hit) startMove(p, hit, e.shiftKey);
+    return;
+  }
+  if (t === "copy") {
+    const hit = hitEdit(p, null, true);
+    if (hit) startMove(p, hit, true);
     return;
   }
   if (t === "delete") {
@@ -1032,8 +1054,13 @@ function drawUp() {
   state.drawing = null;
   if (!d) return;
   if (d.type === "move") {
-    planCv.style.cursor = "grab";
-    if (d.moved) saveEdits(d.target.type === "erase"); else { state.undo.pop(); drawPlan(); }
+    planCv.style.cursor = state.tool === "copy" ? "copy" : "grab";
+    if (d.moved) saveEdits(d.target.type === "erase");
+    else if (d.copy) {   // a plain click: put the copy just beside the original so it is visible
+      translateEdit(d.target, 12 * cssPx(), 12 * cssPx());
+      saveEdits(d.target.type === "erase");
+      flash("복사됨 · Ctrl+드래그로 옮기세요");
+    } else { state.undo.pop(); drawPlan(); }
     return;
   }
   const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
@@ -1650,7 +1677,7 @@ function loop() {
 }
 
 const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle",
-  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyE: "erase", KeyX: "delete" };
+  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyV: "copy", KeyE: "erase", KeyX: "delete" };
 
 for (const ev of ["keydown", "keyup"]) document.addEventListener(ev, (e) => {
   if ((e.key === "Control" || e.key === "Meta") && state.mode === "draw") moveCursor(e, state.hover);
