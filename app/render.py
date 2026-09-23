@@ -64,9 +64,18 @@ DEFAULT_SETTINGS = {
     "move_anchor": "center",   # the recorded moment is the move's start | center | end
     # output
     "overlay_codec": "qtrle",  # qtrle: QuickTime Animation (lossless, ~100MB / 10 min 2K) | prores: ProRes 4444 (~4.5GB)
+    # automatic vector detection when a plan is uploaded (and on "다시 인식"), see vectorize.py
+    "auto_walls": True,        # walls as straight lines with clean corners
+    "auto_thin": True,         # thin partitions between walls, windows in the outer walls
+    "auto_doors": True,        # door swing arcs
+    "auto_stairs": True,       # runs of evenly spaced step lines
     # motion analysis (room-change suggestions)
     "hfov": 80,
 }
+
+
+def auto_kinds(settings: dict) -> tuple[str, ...]:
+    return tuple(k for k in ("walls", "thin", "doors", "stairs") if settings.get(f"auto_{k}", True))
 
 
 def merged_settings(s: dict | None) -> dict:
@@ -129,6 +138,15 @@ WORK_PX = 1200  # plans are analysed at this size (long side), whatever their up
 _struct_cache: dict[tuple, dict] = {}
 
 
+def work_image(plan: np.ndarray) -> tuple[float, np.ndarray]:
+    """(scale, plan resized to the working resolution)."""
+    ph, pw = plan.shape[:2]
+    k = WORK_PX / max(ph, pw)
+    big = cv2.resize(plan, (max(1, round(pw * k)), max(1, round(ph * k))),
+                     interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+    return k, big
+
+
 def plan_structure(plan: np.ndarray, settings: dict, edits: list[dict] | None = None) -> dict:
     """Automatic line mask of the plan at working resolution, minus the user's eraser strokes.
 
@@ -145,10 +163,7 @@ def plan_structure(plan: np.ndarray, settings: dict, edits: list[dict] | None = 
     if key in _struct_cache:
         return _struct_cache[key]
 
-    ph, pw = plan.shape[:2]
-    k = WORK_PX / max(ph, pw)
-    big = cv2.resize(plan, (max(1, round(pw * k)), max(1, round(ph * k))),
-                     interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+    k, big = work_image(plan)
     gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
     thr = float(settings["line_threshold"])
     mode = settings["line_mode"]
@@ -228,7 +243,7 @@ def _edit_points(e: dict) -> list:
         (hx, hy), (ex, ey) = e["hinge"], e["end"]
         r = math.hypot(ex - hx, ey - hy)
         return [[hx - r, hy - r], [hx + r, hy + r]]
-    if t in ("stairs", "rect"):
+    if t in ("stairs", "rect", *FIXTURE_TYPES):
         return [e["a"], e["b"]]
     if t == "circle":
         (cx, cy), r = e["c"], float(e["r"])
@@ -241,6 +256,12 @@ def _edit_points(e: dict) -> list:
 
 
 TOILET_ELONGATION = 2.6   # toilet depth / half width ("D" shape: straight sides, round front; 1.0 = plain semicircle)
+FIXTURE_TYPES = ("basin", "sink", "induction", "closet")   # box fixtures drawn from corner a to corner b
+
+
+def _box(e: dict) -> tuple[float, float, float, float]:
+    (x0, y0), (x1, y1) = e["a"], e["b"]
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
 def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.0), value=1, thickness: int = 1) -> None:
@@ -253,11 +274,50 @@ def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.
     def P(pt):
         return int(round((pt[0] * scale - ox) * S)), int(round((pt[1] * scale - oy) * S))
 
+    def line(p, q):
+        cv2.line(img, P(p), P(q), value, thickness, cv2.LINE_AA, shift=4)
+
     for e in edits:
         t = e.get("type")
         thickness = max(1, int(round(normal * 0.45))) if e.get("thin") else normal
         if t == "rect":
             cv2.rectangle(img, P(e["a"]), P(e["b"]), value, thickness, cv2.LINE_AA, shift=4)
+            continue
+        if t in FIXTURE_TYPES:
+            # simple plan symbols: counter box + bowl / burners / hanging rod
+            x0, y0, x1, y1 = _box(e)
+            w, h = x1 - x0, y1 - y0
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            cv2.rectangle(img, P((x0, y0)), P((x1, y1)), value, thickness, cv2.LINE_AA, shift=4)
+            if t == "basin":         # oval bowl in the counter
+                cv2.ellipse(img, P((cx, cy)), (int(w * 0.34 * scale * S), int(h * 0.34 * scale * S)), 0, 0, 360, value, thickness, cv2.LINE_AA, shift=4)
+            elif t == "sink":        # rectangular bowl, inset
+                ix, iy = w * 0.18, h * 0.18
+                cv2.rectangle(img, P((x0 + ix, y0 + iy)), P((x1 - ix, y1 - iy)), value, thickness, cv2.LINE_AA, shift=4)
+            elif t == "induction":   # burners: 2x2 on a square-ish top, a row of 3 along a long one
+                if 0.6 <= w / max(h, 1e-6) <= 1.6:
+                    centres = [(x0 + w * fx, y0 + h * fy) for fx in (0.3, 0.7) for fy in (0.3, 0.7)]
+                    r = min(w, h) * 0.14
+                else:
+                    along = w >= h
+                    centres = [((x0 + w * (i + 0.5) / 3, cy) if along else (cx, y0 + h * (i + 0.5) / 3)) for i in range(3)]
+                    r = min(w, h) * 0.28
+                for c in centres:
+                    cv2.circle(img, P(c), int(r * scale * S), value, thickness, cv2.LINE_AA, shift=4)
+            elif t == "closet":      # hanging rod along the long side with hanger ticks
+                along = w >= h
+                short = min(w, h)
+                step = max(short * 0.5, 1e-6)
+                n = int(min(30, max(w, h) // step))
+                tick = short * 0.22
+                if along:
+                    line((x0, cy), (x1, cy))
+                    for i in range(1, n):
+                        line((x0 + i * step, cy - tick), (x0 + i * step, cy + tick))
+                else:
+                    line((cx, y0), (cx, y1))
+                    for i in range(1, n):
+                        line((cx - tick, y0 + i * step), (cx + tick, y0 + i * step))
             continue
         if t == "circle":
             r = float(e["r"]) * scale
@@ -302,6 +362,20 @@ def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.
                     cv2.line(img, P((x, y0)), P((x, y1)), value, thickness, cv2.LINE_AA, shift=4)
 
 
+def erase_strokes(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.0)) -> None:
+    """Paint the eraser strokes (plan coordinates) as 0 onto img at `scale`."""
+    ox, oy = offset
+    for e in edits:
+        if e.get("type") != "erase":
+            continue
+        pts = (np.asarray(e["pts"], np.float32) * scale - (ox, oy)).astype(np.int32)
+        r = max(1, int(float(e.get("r", 6)) * scale))
+        if len(pts) == 1:
+            cv2.circle(img, tuple(int(v) for v in pts[0]), r, 0, -1)
+        else:
+            cv2.polylines(img, [pts], False, 0, 2 * r)
+
+
 def structure_alpha(plan: np.ndarray, settings: dict, edits: list[dict], crop: tuple, iw: int, ih: int,
                     line_px: float, with_vectors: bool = True) -> np.ndarray:
     """Final line alpha (ih, iw) for the plan area `crop` (plan coords): automatic lines + drawn edits."""
@@ -312,9 +386,14 @@ def structure_alpha(plan: np.ndarray, settings: dict, edits: list[dict], crop: t
     x1, y1 = int(min(st["mask"].shape[1], cx1 * k)), int(min(st["mask"].shape[0], cy1 * k))
     W2, H2 = iw * 2, ih * 2
     sc2 = W2 / (cx1 - cx0)  # plan px -> 2x panel px
+    auto = [e for e in edits if e.get("auto") and e.get("type") != "erase"]
+    manual = [e for e in edits if not e.get("auto") and e.get("type") != "erase"]
 
     canvas = np.zeros((H2, W2), np.float32)
-    if settings["uniform_lines"]:
+    if auto:
+        # the automatic lines were vectorised from this raster: draw the clean vectors instead
+        src = np.zeros((0, 0), np.float32)
+    elif settings["uniform_lines"]:
         src = st["center"][y0:y1, x0:x1].astype(np.float32)
     else:
         src = st["mask"][y0:y1, x0:x1].astype(np.float32)
@@ -328,11 +407,16 @@ def structure_alpha(plan: np.ndarray, settings: dict, edits: list[dict], crop: t
         canvas[ys, xs] = part[ys.start - dy : ys.stop - dy, xs.start - dx : xs.stop - dx]
 
     d = max(2, int(round(line_px * 2)))
-    if settings["uniform_lines"]:
+    if settings["uniform_lines"] and src.size:
         canvas = cv2.dilate(canvas, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
     if with_vectors:
+        if auto:
+            vec = np.zeros((H2, W2), np.uint8)
+            draw_edits(vec, auto, sc2, (cx0 * sc2, cy0 * sc2), 255, d)
+            erase_strokes(vec, edits, sc2, (cx0 * sc2, cy0 * sc2))   # the eraser clips automatic lines only
+            canvas = np.maximum(canvas, vec.astype(np.float32) / 255)
         vec = np.zeros((H2, W2), np.uint8)
-        draw_edits(vec, [e for e in edits if e.get("type") != "erase"], sc2, (cx0 * sc2, cy0 * sc2), 255, d)
+        draw_edits(vec, manual, sc2, (cx0 * sc2, cy0 * sc2), 255, d)
         canvas = np.maximum(canvas, vec.astype(np.float32) / 255)
     canvas = cv2.GaussianBlur(canvas, (3, 3), 0)
     return np.clip(cv2.resize(canvas, (iw, ih), interpolation=cv2.INTER_AREA) * 1.3, 0, 1)

@@ -21,7 +21,8 @@
 <section id="help" class="card help hidden">
   <h2>사용법</h2>
   <ol>
-    <li><b>새 프로젝트</b>에서 편집이 끝난 영상과 도면(층별 여러 장 가능)을 올립니다.</li>
+    <li><b>새 프로젝트</b>에서 편집이 끝난 영상과 도면(층별 여러 장 가능)을 올립니다. 올리면 벽·얇은 칸막이·창·문·계단을 자동으로 인식해서
+      깔끔한 직선과 곡선으로 그려 둡니다(③ 도면 다듬기에서 빨간 선). 잘못 잡힌 것은 지우고 빠진 것은 도구로 그리면 됩니다.</li>
     <li><b>방 찍기</b>: 도면의 빈 곳을 클릭하면 그 자리에 방이 추가됩니다(이름 입력). 드래그로 옮기고, 우클릭하면 삭제합니다.</li>
     <li><b>이동 기록</b>: 영상을 재생하다가 방에 들어가는 순간 <b>숫자키 1~9</b>를 누르세요. 멈춘 상태에서 도면의 방 점이나 방 버튼을 클릭해도 됩니다.
       첫 기록이 출발한 방이 됩니다.</li>
@@ -44,6 +45,7 @@
       <tr><td><kbd>L</kbd> / <kbd>T</kbd></td><td>선 / 얇은 선 (드래그, <kbd>Alt</kbd>는 자유 각도)</td></tr>
       <tr><td><kbd>D</kbd> / <kbd>S</kbd> / <kbd>B</kbd></td><td>문 / 계단 / 변기 (그려진 것을 클릭하면 뒤집기)</td></tr>
       <tr><td><kbd>R</kbd> / <kbd>C</kbd></td><td>사각형 / 원</td></tr>
+      <tr><td><kbd>W</kbd> / <kbd>K</kbd> / <kbd>I</kbd> / <kbd>O</kbd></td><td>세면대 / 싱크대 / 인덕션 / 옷장</td></tr>
       <tr><td><kbd>F</kbd></td><td>뒤집기 (문·변기·계단 클릭)</td></tr>
       <tr><td><kbd>E</kbd> / <kbd>X</kbd></td><td>지우개 / 삭제</td></tr>
       <tr><td><kbd>Ctrl</kbd>+드래그</td><td>그린 도형 옮기기</td></tr>
@@ -158,6 +160,10 @@
           <button data-tool="door" title="문 (D): 경첩 위치에서 문 끝까지 드래그. 그려진 문을 클릭하면 여는 방향이 뒤집힙니다">◜ 문</button>
           <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그. 그려진 계단을 클릭하면 단 방향이 뒤집힙니다">▤ 계단</button>
           <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (옆면은 곧고 앞쪽만 둥근 D 모양). 그려진 변기를 클릭하면 반대쪽으로 뒤집힙니다">◗ 변기</button>
+          <button data-tool="basin" title="세면대 (W): 모서리에서 모서리로 드래그 (상판 + 타원 볼)">◍ 세면대</button>
+          <button data-tool="sink" title="주방 싱크대 (K): 모서리에서 모서리로 드래그 (상판 + 사각 볼)">▣ 싱크대</button>
+          <button data-tool="induction" title="인덕션 (I): 모서리에서 모서리로 드래그 (정사각에 가까우면 화구 4개, 길쭉하면 3개)">⊞ 인덕션</button>
+          <button data-tool="closet" title="옷장 (O): 모서리에서 모서리로 드래그 (긴 쪽으로 옷걸이 봉과 옷걸이 표시)">▥ 옷장</button>
           <button data-tool="rect" title="사각형 (R): 모서리에서 모서리로 드래그 (욕조, 세면대, 기둥 등)">▭ 사각형</button>
           <button data-tool="circle" title="원 (C): 중심에서 바깥으로 드래그">○ 원</button>
           <button data-tool="flip" title="뒤집기 (F): 문은 여는 방향, 변기는 벽 반대쪽, 계단은 단 방향이 뒤집힙니다">⇄ 뒤집기</button>
@@ -166,13 +172,22 @@
           <button id="undoBtn" title="되돌리기 (Ctrl+Z)">↶ 되돌리기</button>
         </div>
         <div class="tools opts">
+          <span title="도면을 올릴 때 자동으로 인식할 항목. 바꾼 뒤 '다시 인식'을 누르면 보고 있는 층에 적용됩니다">자동 인식</span>
+          <label class="chk"><input type="checkbox" data-setting="auto_walls" /> 벽</label>
+          <label class="chk" title="벽 사이의 얇은 칸막이(화장실 유리벽 등)와 바깥벽의 창을 얇은 선으로"><input type="checkbox" data-setting="auto_thin" /> 얇은 선·창</label>
+          <label class="chk" title="도면에 그려진 문 호(1/4원)를 문으로"><input type="checkbox" data-setting="auto_doors" /> 문</label>
+          <label class="chk" title="일정한 간격의 평행선 묶음을 계단으로"><input type="checkbox" data-setting="auto_stairs" /> 계단</label>
+          <button id="autoDetectBtn" title="이 층 도면을 다시 인식합니다. 자동으로 잡힌 항목(빨간 선)만 바뀌고 직접 그린 것과 지우개 자국은 남습니다">↻ 다시 인식</button>
+          <button id="autoClearBtn" title="이 층의 자동 인식 항목을 모두 지웁니다 (직접 그린 것은 남습니다). 지우면 예전 방식의 픽셀 벽 인식이 다시 보입니다">자동 인식 지우기</button>
+        </div>
+        <div class="tools opts">
           <label>자동 벽 인식<select data-setting="line_mode">
             <option value="structure">컬러·렌더링 도면 (어두운 벽만)</option>
             <option value="walls">흑백 도면 (굵은 선만)</option>
             <option value="lines">흑백 도면 (모든 선)</option>
             <option value="none">사용 안 함 (직접 그리기)</option></select></label>
           <label>인식 강도 <input type="range" min="60" max="240" step="5" data-setting="line_threshold" /></label>
-          <label class="chk" title="변기·사각형·원을 벽보다 얇은 선으로 그립니다"><input type="checkbox" id="shapesThin" checked /> 도형은 얇게</label>
+          <label class="chk" title="변기·세면대·싱크대·인덕션·옷장·사각형·원을 벽보다 얇은 선으로 그립니다"><input type="checkbox" id="shapesThin" checked /> 도형은 얇게</label>
           <label>지우개 크기 <input type="range" id="eraseSize" min="3" max="40" value="12" /></label>
           <label class="chk"><input type="checkbox" id="showOriginal" checked /> 원본 겹쳐 보기</label>
         </div>
@@ -277,6 +292,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=18"></script>
+<script src="/static/app.js?v=19"></script>
 </body>
 </html>

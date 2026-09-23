@@ -1,6 +1,12 @@
+import math
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+# the API tests must never touch the real data/ folder
+os.environ["HOUSEMAP_DATA"] = tempfile.mkdtemp(prefix="housemap-test-")
 
 import cv2
 import numpy as np
@@ -231,3 +237,109 @@ def test_floor_without_window_follows_the_marker():
     tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
     assert tr["pfloor"].tolist() == [0, 0, 0, 1, 1, -1]                # auto 1F, then 2F's window, then nothing
     assert tr["panel"][0] == 1                                         # no fade-in at the very start of the video
+
+
+# ---------- automatic vectorisation (app/vectorize.py) ----------
+
+def test_auto_edits_vectorise_walls_doors_and_windows(sample):
+    from app.vectorize import auto_edits
+    plan = auto_trim(load_plan(sample / "plan_1f.png"))
+    edits = auto_edits(plan, merged_settings({"line_mode": "structure"}))
+    assert edits and all(e.get("auto") for e in edits)
+    walls = [e for e in edits if e["type"] == "line" and not e.get("thin")]
+    assert len(walls) >= 8
+    for e in walls:   # straight, axis-aligned lines: no bumpy tracing
+        (x0, y0), (x1, y1) = e["pts"]
+        assert x0 == x1 or y0 == y1
+    # outer walls of the source sit at x=100/900, y=100/700; auto_trim cuts 63px off each side
+    xs = sorted({e["pts"][0][0] for e in walls if e["pts"][0][0] == e["pts"][1][0]})
+    ys = sorted({e["pts"][0][1] for e in walls if e["pts"][0][1] == e["pts"][1][1]})
+    assert abs(xs[0] - 37) < 6 and abs(xs[-1] - 837) < 6 and abs(ys[0] - 37) < 6 and abs(ys[-1] - 637) < 6
+    doors = sorted((e for e in edits if e["type"] == "door"), key=lambda d: d["hinge"][0])
+    assert len(doors) == 2
+    assert doors[0]["hinge"] == pytest.approx([267, 337], abs=5)   # arc centre (330, 400) in the source
+    assert doors[1]["hinge"] == pytest.approx([387, 267], abs=5)   # arc centre (450, 330)
+    for d in doors:   # radius 90 in the source, the leaf is perpendicular to its wall
+        assert abs(math.hypot(d["end"][0] - d["hinge"][0], d["end"][1] - d["hinge"][1]) - 90) < 12
+        assert d["end"][0] == d["hinge"][0] or d["end"][1] == d["hinge"][1]
+    windows = [e for e in edits if e["type"] == "line" and e.get("thin")]
+    assert any(abs(e["pts"][0][1] - 37) < 8 and e["pts"][0][0] > 500 for e in windows)   # window in the top wall (600-800)
+
+
+def test_auto_edits_find_a_flight_of_stairs():
+    from app.vectorize import auto_edits
+    img = np.full((600, 800, 3), 255, np.uint8)
+    cv2.rectangle(img, (50, 50), (750, 550), (20, 20, 20), 14)
+    for i in range(8):   # 8 step lines, 25px apart, white treads between them
+        cv2.line(img, (600, 200 + i * 25), (680, 200 + i * 25), (80, 80, 80), 2)
+    cv2.line(img, (600, 200), (600, 375), (80, 80, 80), 2)
+    cv2.line(img, (680, 200), (680, 375), (80, 80, 80), 2)
+    edits = auto_edits(img, merged_settings({"line_mode": "structure"}))
+    st = [e for e in edits if e["type"] == "stairs"]
+    assert len(st) == 1
+    (ax, ay), (bx, by) = st[0]["a"], st[0]["b"]
+    assert abs(min(ax, bx) - 600) < 10 and abs(max(ax, bx) - 680) < 10
+    assert abs(min(ay, by) - 187) < 15 and abs(max(ay, by) - 388) < 15
+    assert st[0]["steps"] == 9 and st[0]["flip"] is False
+    assert len([e for e in edits if e["type"] == "line" and not e.get("thin")]) == 4   # just the frame
+
+
+def test_auto_lines_replace_the_raster_and_the_eraser_clips_them(sample):
+    from app.render import structure_alpha
+    plan = auto_trim(load_plan(sample / "plan_1f.png"))
+    ph, pw = plan.shape[:2]
+    s = merged_settings({"line_mode": "structure"})
+    full = (0, 0, pw, ph)
+    raster = structure_alpha(plan, s, [], full, pw, ph, 3)
+    auto = [{"type": "line", "pts": [[37, 37], [837, 37]], "auto": True}]
+    a = structure_alpha(plan, s, auto, full, pw, ph, 3)
+    assert raster[300:340, 30:45].max() > 0.5      # the left outer wall, from the raster
+    assert a[300:340, 30:45].max() < 0.05          # gone: automatic vectors stand in for the raster
+    assert a[33:41, 400].max() > 0.5               # the automatic line itself
+    erased = structure_alpha(plan, s, auto + [{"type": "erase", "pts": [[400, 37]], "r": 20}], full, pw, ph, 3)
+    assert erased[33:41, 400].max() < 0.05 and erased[33:41, 100].max() > 0.5
+    hand = structure_alpha(plan, s, auto + [{"type": "line", "pts": [[100, 300], [700, 300]]},
+                                            {"type": "erase", "pts": [[400, 300]], "r": 20}], full, pw, ph, 3)
+    assert hand[296:304, 400].max() > 0.5          # the eraser leaves hand-drawn lines alone
+
+
+def test_fixture_symbols_draw_inside_their_box():
+    from app.render import draw_edits
+    for t in ("basin", "sink", "induction", "closet"):
+        img = np.zeros((200, 300), np.uint8)
+        draw_edits(img, [{"type": t, "a": [20, 20], "b": [280, 120]}], 1.0, value=255, thickness=3)
+        assert img[20, 150] > 0 and img[120, 150] > 0 and img[70, 20] > 0, t   # the box outline
+        assert img[30:110, 30:270].max() > 0, t                                  # the symbol inside
+        assert img[130:, :].max() == 0 and img[:, 290:].max() == 0, t           # nothing outside
+
+
+def test_clean_edits_keeps_auto_flag_and_fixtures():
+    from app.main import clean_edits
+    out = clean_edits([{"type": "basin", "a": [1, 2], "b": [3, 4], "thin": True, "auto": True},
+                       {"type": "stairs", "a": [0, 0], "b": [10, 30], "steps": 5, "flip": True},
+                       {"type": "bogus", "a": [0, 0]}])
+    assert out == [{"type": "basin", "a": [1.0, 2.0], "b": [3.0, 4.0], "thin": True, "auto": True},
+                   {"type": "stairs", "a": [0.0, 0.0], "b": [10.0, 30.0], "flip": True, "steps": 5}]
+
+
+def test_upload_runs_auto_detection_and_redetect_api(sample):
+    from fastapi.testclient import TestClient
+    from app import main
+    assert str(main.DATA_ROOT).startswith(tempfile.gettempdir())   # never the real data/ folder
+    client = TestClient(main.app)
+    with open(sample / "walk.mp4", "rb") as v, open(sample / "plan_1f.png", "rb") as p:
+        r = client.post("/api/projects", files=[("video", ("walk.mp4", v, "video/mp4")), ("plans", ("plan_1f.png", p, "image/png"))],
+                        data={"name": "t"})
+    assert r.status_code == 200, r.text
+    proj = r.json()
+    pid, fl = proj["id"], proj["floors"][0]
+    assert any(e.get("auto") and e["type"] == "door" for e in fl["edits"])
+    assert any(e.get("auto") and e["type"] == "line" for e in fl["edits"])
+    # clearing removes the automatic items only
+    client.put(f"/api/projects/{pid}", json={"floors": [{"id": fl["id"], "edits": fl["edits"] + [{"type": "rect", "a": [1, 1], "b": [5, 5]}]}]})
+    r = client.post(f"/api/projects/{pid}/floors/{fl['id']}/auto", json={"kinds": []})
+    assert r.json()["floors"][0]["edits"] == [{"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}]
+    r = client.post(f"/api/projects/{pid}/floors/{fl['id']}/auto", json={"kinds": ["doors"]})
+    edits = r.json()["floors"][0]["edits"]
+    assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[0] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
+    client.delete(f"/api/projects/{pid}")

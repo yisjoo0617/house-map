@@ -19,9 +19,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .motion import analyze_video
-from .render import (FFMPEG, DEFAULT_SETTINGS, auto_trim, build_preview, decode_plan, imwrite, load_plan, show_windows,
-                     merged_settings, render_outputs, rooms_by_floor, routing, structure_alpha)
+from .render import (FFMPEG, DEFAULT_SETTINGS, FIXTURE_TYPES, auto_kinds, auto_trim, build_preview, decode_plan, imwrite,
+                     load_plan, show_windows, merged_settings, render_outputs, rooms_by_floor, routing, structure_alpha)
 from .track import compute_room_track, plan_only_track
+from .vectorize import AUTO_KINDS, auto_edits
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = Path(os.environ.get("HOUSEMAP_DATA", ROOT / "data"))  # tests point this elsewhere
@@ -78,14 +79,25 @@ def probe_video(path: Path) -> dict:
     return {"fps": fps, "frames": frames, "width": w, "height": h, "duration": frames / fps}
 
 
-def save_plan_upload(d: Path, upload: UploadFile, fid: str) -> dict:
+def save_plan_upload(d: Path, upload: UploadFile, fid: str, settings: dict) -> dict:
     img = cv2.imdecode(np.frombuffer(upload.file.read(), np.uint8), cv2.IMREAD_UNCHANGED)
     if img is None:
         raise HTTPException(400, f"도면은 PNG/JPG 이미지로 올려주세요 ({upload.filename})")
     trimmed = auto_trim(decode_plan(img))
     name = f"plan_{fid}.png"
     imwrite(d / name, trimmed)
-    return {"id": fid, "file": name, "width": int(trimmed.shape[1]), "height": int(trimmed.shape[0])}
+    return {"id": fid, "file": name, "width": int(trimmed.shape[1]), "height": int(trimmed.shape[0]),
+            "edits": detect_edits(trimmed, settings)}
+
+
+def detect_edits(plan: np.ndarray, settings: dict, kinds=None) -> list[dict]:
+    """Automatic walls / thin lines / doors / stairs as vector edits; a detection failure must not block an upload."""
+    kinds = auto_kinds(settings) if kinds is None else kinds
+    try:
+        return auto_edits(plan, merged_settings(settings), kinds)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"auto detection failed: {e!r}")
+        return []
 
 
 def title_of(proj: dict) -> str:
@@ -211,10 +223,11 @@ def create_project(
             shutil.copyfileobj(video.file, f, length=8 << 20)
         info = probe_video(vpath)
 
+        settings = merged_settings(load_presets().get(preset))
         given = [s.strip() for s in labels.split(",")] if labels else []
         floors = []
         for i, up in enumerate(plans):
-            fl = save_plan_upload(d, up, f"f{i + 1}")
+            fl = save_plan_upload(d, up, f"f{i + 1}", settings)
             fl["label"] = given[i] if i < len(given) and given[i] else f"{i + 1}F"
             floors.append(fl)
 
@@ -225,7 +238,7 @@ def create_project(
             "floors": floors,
             "rooms": [],
             "events": [],
-            "settings": merged_settings(load_presets().get(preset)),
+            "settings": settings,
         }
         (d / "project.json").write_text(json.dumps(proj, ensure_ascii=False, indent=2), "utf-8")
     except Exception:
@@ -306,7 +319,8 @@ def update_project(pid: str, body: ProjectUpdate):
 
 
 def clean_edits(edits) -> list[dict]:
-    """Validate drawing edits: line / door / stairs / rect / circle / toilet / erase, all in plan-pixel coordinates."""
+    """Validate drawing edits: line / door / stairs / rect / circle / toilet / fixtures / erase, all in plan-pixel
+    coordinates. "auto": true marks items the automatic detection made (the eraser and "다시 인식" act on those)."""
     def pt(v):
         return [round(float(v[0]), 1), round(float(v[1]), 1)]
 
@@ -316,21 +330,25 @@ def clean_edits(edits) -> list[dict]:
             t = e.get("type")
             if t == "line":
                 out.append({"type": t, "pts": [pt(v) for v in e["pts"]][:200]})
-            elif t in ("rect", "toilet"):
+            elif t in ("rect", "toilet", *FIXTURE_TYPES):
                 out.append({"type": t, "a": pt(e["a"]), "b": pt(e["b"])})
             elif t == "circle":
                 out.append({"type": t, "c": pt(e["c"]), "r": round(float(e["r"]), 1)})
             elif t == "door":
                 out.append({"type": t, "hinge": pt(e["hinge"]), "end": pt(e["end"]), "flip": bool(e.get("flip"))})
             elif t == "stairs":
-                item = {"type": t, "a": pt(e["a"]), "b": pt(e["b"])}
+                item = {"type": t, "a": pt(e["a"]), "b": pt(e["b"]), "flip": bool(e.get("flip"))}
                 if e.get("steps"):
                     item["steps"] = int(e["steps"])
                 out.append(item)
             elif t == "erase":
                 out.append({"type": t, "pts": [pt(v) for v in e["pts"]][:2000], "r": round(float(e.get("r", 6)), 1)})
-            if t != "erase" and out and e.get("thin"):
+            else:
+                continue
+            if t != "erase" and e.get("thin"):
                 out[-1]["thin"] = True
+            if e.get("auto"):
+                out[-1]["auto"] = True
     except (KeyError, TypeError, ValueError, IndexError):
         raise HTTPException(400, "잘못된 도면 편집 데이터입니다")
     return out
@@ -357,12 +375,33 @@ def get_structure(pid: str, fid: str):
     return Response(buf.tobytes(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+class AutoBody(BaseModel):
+    kinds: list[str] | None = None   # None = the project's auto_* settings; [] = remove the automatic items
+
+
+@app.post("/api/projects/{pid}/floors/{fid}/auto")
+def redetect_floor(pid: str, fid: str, body: AutoBody):
+    """Run the automatic detection again for one floor: automatic items are replaced, hand-drawn ones and
+    eraser strokes stay."""
+    d = pdir(pid)
+    proj = load_project(pid)
+    fl = next((f for f in proj["floors"] if f["id"] == fid), None)
+    if not fl:
+        raise HTTPException(404, "층이 없습니다")
+    s = merged_settings(proj.get("settings"))
+    kinds = tuple(k for k in body.kinds if k in AUTO_KINDS) if body.kinds is not None else auto_kinds(s)
+    manual = [e for e in fl.get("edits", []) if not e.get("auto")]
+    fl["edits"] = manual + (detect_edits(load_plan(d / fl["file"]), s, kinds) if kinds else [])
+    save_project(pid, proj)
+    return public_project(pid)
+
+
 @app.post("/api/projects/{pid}/floors")
 def add_floor(pid: str, plan: UploadFile = File(...), label: str = Form("")):
     d = pdir(pid)
     proj = load_project(pid)
     n = 1 + max((int(f["id"][1:]) for f in proj["floors"]), default=0)
-    fl = save_plan_upload(d, plan, f"f{n}")
+    fl = save_plan_upload(d, plan, f"f{n}", merged_settings(proj.get("settings")))
     fl["label"] = label or f"{len(proj['floors']) + 1}F"
     proj["floors"].append(fl)
     save_project(pid, proj)

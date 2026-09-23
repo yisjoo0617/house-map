@@ -661,7 +661,7 @@ function bendableMoves() {
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽 · 파란 선 = 직접 그린 선 · 문과 계단은 직접 그리고, 가구 찌꺼기는 지우개로 지우세요 · Ctrl+드래그 = 그린 도형 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 (삭제·옮기기·뒤집기 가능) · 파란 선 = 직접 그린 것 · 잘못 잡힌 것은 삭제(X)나 지우개로, 빠진 것은 도구로 그리세요 · Ctrl+드래그 = 도형 옮기기"
     : state.mode === "route"
       ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 직선으로 되돌리기"
       : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
@@ -898,6 +898,37 @@ async function loadStruct() {
   drawPlan();
 }
 
+// ---------------- automatic detection (walls / thin lines / doors / stairs) ----------------
+// Runs on upload; "다시 인식" replaces only the automatic items of the floor being viewed.
+
+$("#autoDetectBtn").addEventListener("click", () => redetect(false));
+$("#autoClearBtn").addEventListener("click", () => redetect(true));
+
+async function redetect(clear) {
+  if (!state.proj) return;
+  const f = floorOf(state.viewFloor);
+  const n = (f.edits || []).filter((e) => e.auto).length;
+  if (clear && n && !confirm(`${f.label}의 자동 인식 항목 ${n}개를 지울까요? 직접 그린 것과 지우개 자국은 남습니다.`)) return;
+  const s = state.proj.settings;
+  const kinds = clear ? [] : ["walls", "thin", "doors", "stairs"].filter((k) => s["auto_" + k]);
+  if (!clear && !kinds.length) { flash("인식할 항목을 하나 이상 선택하세요"); return; }
+  const btn = $("#autoDetectBtn");
+  btn.disabled = true;
+  try {
+    await flushSaves();
+    pushUndo();
+    const proj = await api(`/api/projects/${state.proj.id}/floors/${f.id}/auto`, { method: "POST", body: JSON.stringify({ kinds }) });
+    f.edits = proj.floors.find((x) => x.id === f.id)?.edits || [];
+    flash(clear ? "자동 인식 항목 삭제" : `자동 인식 ${f.edits.filter((e) => e.auto).length}개 (Ctrl+Z로 되돌리기)`);
+    drawPlan();
+    await Promise.all([refreshMinimap(), refreshTrack(), loadStruct()]);
+  } catch (err) {
+    alert("자동 인식 실패: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function pushUndo() {
   state.undo.push({ fid: state.viewFloor, edits: JSON.stringify(curEdits()) });
   if (state.undo.length > 100) state.undo.shift();
@@ -1015,7 +1046,7 @@ function drawUp() {
   else if (d.type === "door") curEdits().push({ type: "door", hinge: [d.start.x, d.start.y], end: [d.end.x, d.end.y], flip: false });
   else if (d.type === "stairs") curEdits().push({ type: "stairs", a: [d.start.x, d.start.y], b: [d.end.x, d.end.y] });
   else if (d.type === "thinline") curEdits().push({ type: "line", pts: [[d.start.x, d.start.y], [d.end.x, d.end.y]], thin: true });
-  else curEdits().push({ ...previewShape(d), thin: $("#shapesThin").checked });  // toilet / rect / circle
+  else curEdits().push({ ...previewShape(d), thin: $("#shapesThin").checked });  // toilet / rect / circle / fixtures
   saveEdits(d.type === "erase");
 }
 
@@ -1026,6 +1057,7 @@ function segDist(p, a, b) {
 }
 
 const FLIPPABLE = ["door", "toilet", "stairs"];
+const FIXTURES = ["basin", "sink", "induction", "closet"];   // box symbols drawn from corner a to corner b
 const TOILET_ELONGATION = 2.6;   // depth / half width ("D" shape, same as the renderer)
 
 function flipEdit(e) {
@@ -1077,7 +1109,7 @@ const polySegments = (pts, closed) => {
 };
 
 function editSegments(e) {
-  if (e.type === "rect") {
+  if (e.type === "rect" || FIXTURES.includes(e.type)) {
     const [x0, y0] = e.a, [x1, y1] = e.b;
     return polySegments([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], true);
   }
@@ -1094,7 +1126,7 @@ function editSegments(e) {
 
 // point inside a closed shape (stairs / rect box, toilet half-ellipse)?
 function insideEdit(e, p) {
-  if (e.type === "stairs" || e.type === "rect") {
+  if (e.type === "stairs" || e.type === "rect" || FIXTURES.includes(e.type)) {
     return p.x >= Math.min(e.a[0], e.b[0]) && p.x <= Math.max(e.a[0], e.b[0]) && p.y >= Math.min(e.a[1], e.b[1]) && p.y <= Math.max(e.a[1], e.b[1]);
   }
   if (e.type === "toilet") {
@@ -1147,6 +1179,8 @@ function drawEditShape(ctx, e) {
     ctx.arc(g.cx, g.cy, g.w, g.ang + Math.PI / 2, g.ang - Math.PI / 2, true);
     ctx.lineTo(g.ax - g.nx * g.w, g.ay - g.ny * g.w);
     ctx.closePath();
+  } else if (FIXTURES.includes(e.type)) {
+    drawFixture(ctx, e);
   } else if (e.type === "stairs") {
     const x0 = Math.min(e.a[0], e.b[0]), x1 = Math.max(e.a[0], e.b[0]);
     const y0 = Math.min(e.a[1], e.b[1]), y1 = Math.max(e.a[1], e.b[1]);
@@ -1162,6 +1196,41 @@ function drawEditShape(ctx, e) {
   ctx.stroke();
 }
 
+// the same simple symbols the renderer draws (see draw_edits in app/render.py)
+function drawFixture(ctx, e) {
+  const x0 = Math.min(e.a[0], e.b[0]), x1 = Math.max(e.a[0], e.b[0]);
+  const y0 = Math.min(e.a[1], e.b[1]), y1 = Math.max(e.a[1], e.b[1]);
+  const w = x1 - x0, h = y1 - y0, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  ctx.rect(x0, y0, w, h);
+  if (e.type === "basin") {
+    ctx.moveTo(cx + w * 0.34, cy);
+    ctx.ellipse(cx, cy, w * 0.34, h * 0.34, 0, 0, Math.PI * 2);
+  } else if (e.type === "sink") {
+    ctx.rect(x0 + w * 0.18, y0 + h * 0.18, w * 0.64, h * 0.64);
+  } else if (e.type === "induction") {
+    let centres, r;
+    if (w / (h || 1e-6) >= 0.6 && w / (h || 1e-6) <= 1.6) {
+      centres = [0.3, 0.7].flatMap((fx) => [0.3, 0.7].map((fy) => [x0 + w * fx, y0 + h * fy]));
+      r = Math.min(w, h) * 0.14;
+    } else {
+      const along = w >= h;
+      centres = [0, 1, 2].map((i) => along ? [x0 + w * (i + 0.5) / 3, cy] : [cx, y0 + h * (i + 0.5) / 3]);
+      r = Math.min(w, h) * 0.28;
+    }
+    for (const [x, y] of centres) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
+  } else if (e.type === "closet") {
+    const along = w >= h, short = Math.min(w, h), step = Math.max(short * 0.5, 1e-6), tick = short * 0.22;
+    const n = Math.min(30, Math.floor(Math.max(w, h) / step));
+    if (along) {
+      ctx.moveTo(x0, cy); ctx.lineTo(x1, cy);
+      for (let i = 1; i < n; i++) { ctx.moveTo(x0 + i * step, cy - tick); ctx.lineTo(x0 + i * step, cy + tick); }
+    } else {
+      ctx.moveTo(cx, y0); ctx.lineTo(cx, y1);
+      for (let i = 1; i < n; i++) { ctx.moveTo(cx - tick, y0 + i * step); ctx.lineTo(cx + tick, y0 + i * step); }
+    }
+  }
+}
+
 function drawEditsLayer(ctx, u) {
   ctx.lineCap = ctx.lineJoin = "round";
   for (const e of curEdits()) {
@@ -1173,7 +1242,7 @@ function drawEditsLayer(ctx, u) {
       if (e.pts.length === 1) ctx.lineTo(e.pts[0][0] + 0.01, e.pts[0][1]);
       ctx.stroke();
     } else {
-      ctx.strokeStyle = "#2563eb";
+      ctx.strokeStyle = e.auto ? "#dc2626" : "#2563eb";   // red = detected automatically, blue = drawn by hand
       ctx.lineWidth = (e.thin ? 1.3 : 2.5) * u;
       drawEditShape(ctx, e);
     }
@@ -1188,7 +1257,7 @@ function drawEditsLayer(ctx, u) {
       ctx.stroke();
     } else {
       const shape = previewShape(d);
-      const thin = d.type === "thinline" || (["toilet", "rect", "circle"].includes(d.type) && $("#shapesThin").checked);
+      const thin = d.type === "thinline" || (["toilet", "rect", "circle", ...FIXTURES].includes(d.type) && $("#shapesThin").checked);
       ctx.strokeStyle = "#16a34a";
       ctx.lineWidth = (thin ? 1.3 : 2.5) * u;
       drawEditShape(ctx, shape);
@@ -1580,7 +1649,8 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle", KeyF: "flip", KeyE: "erase", KeyX: "delete" };
+const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle",
+  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyE: "erase", KeyX: "delete" };
 
 for (const ev of ["keydown", "keyup"]) document.addEventListener(ev, (e) => {
   if ((e.key === "Control" || e.key === "Meta") && state.mode === "draw") moveCursor(e, state.hover);
