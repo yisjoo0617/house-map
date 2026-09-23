@@ -661,7 +661,7 @@ function bendableMoves() {
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽 · 파란 선 = 직접 그린 선 · 문과 계단은 직접 그리고, 가구 찌꺼기는 지우개로 지우세요"
+    ? "빨간 선 = 자동으로 인식된 벽 · 파란 선 = 직접 그린 선 · 문과 계단은 직접 그리고, 가구 찌꺼기는 지우개로 지우세요 · Ctrl+드래그 = 그린 도형 옮기기"
     : state.mode === "route"
       ? "파란 선 = 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 기록 표의 초기화 = 직선으로 되돌리기"
       : "빈 곳 클릭 = 방 추가 · 방 클릭 = 현재 시각에 그 방으로 이동 기록 · 드래그 = 위치 수정 · 우클릭 = 방 삭제";
@@ -938,10 +938,29 @@ function snapPoint(p, from, free) {
   return p;
 }
 
+// Ctrl (or ⌘) + drag moves any drawn item as a whole
+function translateEdit(e, dx, dy) {
+  const mv = (q) => [q[0] + dx, q[1] + dy];
+  if (e.pts) e.pts = e.pts.map(mv);
+  if (e.hinge) { e.hinge = mv(e.hinge); e.end = mv(e.end); }
+  if (e.a) { e.a = mv(e.a); e.b = mv(e.b); }
+  if (e.c) e.c = mv(e.c);
+}
+
+function moveCursor(e, p) {
+  if (state.drawing) return;
+  planCv.style.cursor = (e.ctrlKey || e.metaKey) && p && hitEdit(p, null, true) ? "grab" : "crosshair";
+}
+
 function drawDown(e) {
   const p = planPoint(e);
   planCv.setPointerCapture(e.pointerId);
   const t = state.tool;
+  if (e.ctrlKey || e.metaKey) {
+    const hit = hitEdit(p, null, true);
+    if (hit) { pushUndo(); state.drawing = { type: "move", target: hit, last: p, moved: false }; planCv.style.cursor = "grabbing"; }
+    return;
+  }
   if (t === "delete") {
     const hit = hitEdit(p);
     if (hit) { pushUndo(); curEdits().splice(curEdits().indexOf(hit), 1); saveEdits(hit.type === "erase"); }
@@ -964,7 +983,14 @@ function drawMove(e) {
   const d = state.drawing;
   const p = planPoint(e);
   state.hover = p;
-  if (!d) { if (state.tool === "erase") drawPlan(); return; }
+  if (!d) { moveCursor(e, p); if (state.tool === "erase") drawPlan(); return; }
+  if (d.type === "move") {
+    translateEdit(d.target, p.x - d.last.x, p.y - d.last.y);
+    d.last = p;
+    d.moved = true;
+    drawPlan();
+    return;
+  }
   if (d.type === "erase") d.pts.push([p.x, p.y]);
   else if (d.type !== "flip") d.end = (d.type === "line" || d.type === "thinline") ? snapPoint(p, d.start, e.altKey) : p;
   drawPlan();
@@ -974,6 +1000,11 @@ function drawUp() {
   const d = state.drawing;
   state.drawing = null;
   if (!d) return;
+  if (d.type === "move") {
+    planCv.style.cursor = "grab";
+    if (d.moved) saveEdits(d.target.type === "erase"); else { state.undo.pop(); drawPlan(); }
+    return;
+  }
   const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
   const min = 4 * cssPx();
   pushUndo();
@@ -995,7 +1026,7 @@ function segDist(p, a, b) {
 }
 
 const FLIPPABLE = ["door", "toilet", "stairs"];
-const TOILET_ELONGATION = 1.3;   // bowl depth / half width (same as the renderer)
+const TOILET_ELONGATION = 2.6;   // depth / half width ("D" shape, same as the renderer)
 
 function flipEdit(e) {
   if (e.type === "door") e.flip = !e.flip;                                   // swing direction
@@ -1020,16 +1051,23 @@ function ring(cx, cy, r, a0, a1, n = 24) {
   });
 }
 
-function toiletOutline(e, n = 24) {
+// "D" outline: flat side at a, straight sides, semicircular front reaching b (plan coords)
+function toiletGeom(e) {
   const [ax, ay] = e.a, [bx, by] = e.b;
-  const depth = Math.hypot(bx - ax, by - ay), w = depth / TOILET_ELONGATION, ang = Math.atan2(by - ay, bx - ax);
-  const c = Math.cos(ang), s = Math.sin(ang);
-  // half ellipse from -90° to +90° around the bowl direction; the closing chord is the flat side on the wall
-  return Array.from({ length: n + 1 }, (_, i) => {
-    const t = -Math.PI / 2 + Math.PI * i / n;
-    const u = depth * Math.cos(t), v = w * Math.sin(t);
-    return [ax + u * c - v * s, ay + u * s + v * c];
-  });
+  const depth = Math.hypot(bx - ax, by - ay) || 1, w = depth / TOILET_ELONGATION;
+  const ux = (bx - ax) / depth, uy = (by - ay) / depth, nx = -uy, ny = ux;
+  return { ax, ay, w, ux, uy, nx, ny, cx: ax + ux * (depth - w), cy: ay + uy * (depth - w), ang: Math.atan2(uy, ux) };
+}
+
+function toiletOutline(e, n = 16) {
+  const g = toiletGeom(e);
+  const pts = [[g.ax + g.nx * g.w, g.ay + g.ny * g.w]];
+  for (let i = 0; i <= n; i++) {              // front arc from the +n side round to the -n side
+    const t = g.ang + Math.PI / 2 - Math.PI * i / n;
+    pts.push([g.cx + g.w * Math.cos(t), g.cy + g.w * Math.sin(t)]);
+  }
+  pts.push([g.ax - g.nx * g.w, g.ay - g.ny * g.w]);
+  return pts;
 }
 
 const polySegments = (pts, closed) => {
@@ -1103,9 +1141,11 @@ function drawEditShape(ctx, e) {
   } else if (e.type === "circle") {
     ctx.arc(e.c[0], e.c[1], e.r, 0, Math.PI * 2);
   } else if (e.type === "toilet") {
-    const [ax, ay] = e.a, [bx, by] = e.b;
-    const depth = Math.hypot(bx - ax, by - ay), ang = Math.atan2(by - ay, bx - ax);
-    ctx.ellipse(ax, ay, depth, depth / TOILET_ELONGATION, ang, -Math.PI / 2, Math.PI / 2);
+    const g = toiletGeom(e);
+    ctx.moveTo(g.ax + g.nx * g.w, g.ay + g.ny * g.w);
+    ctx.lineTo(g.cx + g.nx * g.w, g.cy + g.ny * g.w);
+    ctx.arc(g.cx, g.cy, g.w, g.ang + Math.PI / 2, g.ang - Math.PI / 2, true);
+    ctx.lineTo(g.ax - g.nx * g.w, g.ay - g.ny * g.w);
     ctx.closePath();
   } else if (e.type === "stairs") {
     const x0 = Math.min(e.a[0], e.b[0]), x1 = Math.max(e.a[0], e.b[0]);
@@ -1139,7 +1179,7 @@ function drawEditsLayer(ctx, u) {
     }
   }
   const d = state.drawing;
-  if (d && d.type !== "flip") {
+  if (d && d.type !== "flip" && d.type !== "move") {
     if (d.type === "erase") {
       ctx.strokeStyle = "rgba(236,72,153,.45)";
       ctx.lineWidth = d.r * 2;
@@ -1542,6 +1582,10 @@ function loop() {
 
 const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle", KeyF: "flip", KeyE: "erase", KeyX: "delete" };
 
+for (const ev of ["keydown", "keyup"]) document.addEventListener(ev, (e) => {
+  if ((e.key === "Control" || e.key === "Meta") && state.mode === "draw") moveCursor(e, state.hover);
+});
+
 document.addEventListener("keydown", (e) => {
   // typing fields keep their keys; checkboxes / sliders / colour pickers don't block shortcuts
   const typing = e.target.matches("input:not([type=checkbox]):not([type=range]):not([type=color]), select, textarea");
@@ -1552,8 +1596,8 @@ document.addEventListener("keydown", (e) => {
     if (e.code === "Delete" || e.code === "Backspace") return;
   }
   if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-  else if (e.code === "ArrowLeft") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(-1); else video.currentTime -= e.shiftKey ? 10 : 1; }
-  else if (e.code === "ArrowRight") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(1); else video.currentTime += e.shiftKey ? 10 : 1; }
+  else if (e.code === "ArrowLeft") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(-1); else video.currentTime -= e.shiftKey ? 1 : 10; }
+  else if (e.code === "ArrowRight") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(1); else video.currentTime += e.shiftKey ? 1 : 10; }
   else if (/^Digit[1-9]$/.test(e.code) || /^Numpad[1-9]$/.test(e.code)) {
     const room = state.rooms[+e.code.slice(-1) - 1];
     if (room) recordRoom(room);

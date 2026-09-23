@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>House-Map 미니맵 생성기</title>
-  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <link rel="stylesheet" href="/static/style.css?v=10" />
 </head>
 <body>
 <header>
@@ -28,7 +28,28 @@
     <li>타임라인의 ◆ 기록은 드래그해서 시각을 조정할 수 있습니다. <span class="sug">주황 표시</span>는 AI가 추천한 이동 시점입니다.</li>
     <li>미리보기를 확인한 다음 <b>렌더링</b>하고 <code>overlay.mov</code>를 Premiere 영상 위 트랙의 0초 위치에 올립니다.</li>
   </ol>
-  <p>단축키: Space 재생/정지 · ←/→ 1초 · Shift+←/→ 10초 · Ctrl+←/→ 1프레임 · 1~9 방 기록 · Del 가까운 기록 삭제</p>
+  <h3>단축키</h3>
+  <div class="keys">
+    <table>
+      <caption>재생 · 방 기록</caption>
+      <tr><td><kbd>Space</kbd></td><td>재생 / 정지</td></tr>
+      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>10초 이동</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>1초 이동</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>1프레임 이동</td></tr>
+      <tr><td><kbd>1</kbd>~<kbd>9</kbd></td><td>현재 시각에 그 번호의 방으로 이동 기록</td></tr>
+      <tr><td><kbd>Del</kbd></td><td>현재 시각에서 1초 안의 기록 삭제</td></tr>
+    </table>
+    <table>
+      <caption>③ 도면 다듬기</caption>
+      <tr><td><kbd>L</kbd> / <kbd>T</kbd></td><td>선 / 얇은 선 (드래그, <kbd>Alt</kbd>는 자유 각도)</td></tr>
+      <tr><td><kbd>D</kbd> / <kbd>S</kbd> / <kbd>B</kbd></td><td>문 / 계단 / 변기 (그려진 것을 클릭하면 뒤집기)</td></tr>
+      <tr><td><kbd>R</kbd> / <kbd>C</kbd></td><td>사각형 / 원</td></tr>
+      <tr><td><kbd>F</kbd></td><td>뒤집기 (문·변기·계단 클릭)</td></tr>
+      <tr><td><kbd>E</kbd> / <kbd>X</kbd></td><td>지우개 / 삭제</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+드래그</td><td>그린 도형 옮기기</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>되돌리기</td></tr>
+    </table>
+  </div>
 </section>
 
 <main id="listView" class="hidden">
@@ -136,7 +157,7 @@
           <button data-tool="thinline" title="얇은 선 (T): 창, 칸막이, 바닥 단차 등. 수평·수직 자동 맞춤, Alt는 자유 각도">┄ 얇은 선</button>
           <button data-tool="door" title="문 (D): 경첩 위치에서 문 끝까지 드래그. 그려진 문을 클릭하면 여는 방향이 뒤집힙니다">◜ 문</button>
           <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그. 그려진 계단을 클릭하면 단 방향이 뒤집힙니다">▤ 계단</button>
-          <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (살짝 긴 반타원). 그려진 변기를 클릭하면 반대쪽으로 뒤집힙니다">◗ 변기</button>
+          <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (옆면은 곧고 앞쪽만 둥근 D 모양). 그려진 변기를 클릭하면 반대쪽으로 뒤집힙니다">◗ 변기</button>
           <button data-tool="rect" title="사각형 (R): 모서리에서 모서리로 드래그 (욕조, 세면대, 기둥 등)">▭ 사각형</button>
           <button data-tool="circle" title="원 (C): 중심에서 바깥으로 드래그">○ 원</button>
           <button data-tool="flip" title="뒤집기 (F): 문은 여는 방향, 변기는 벽 반대쪽, 계단은 단 방향이 뒤집힙니다">⇄ 뒤집기</button>
@@ -256,6 +277,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=15"></script>
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

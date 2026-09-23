@@ -174,3 +174,12 @@ button.evroute-clear:hover { color: #dc2626; border-color: #dc2626; }
 button.evroute.active { background: #2563eb; border-color: #2563eb; color: #fff; }
 .evsec { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .evsec input { width: 58px; padding: 2px 4px; margin-right: 3px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
+
+/* ---------- help: shortcut tables ---------- */
+.help h3 { margin: 14px 0 6px; font-size: 14px; }
+.keys { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+.keys table { border-collapse: collapse; font-size: 13px; min-width: 260px; }
+.keys caption { text-align: left; font-weight: 600; color: var(--muted); padding: 0 0 4px; }
+.keys td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.keys td:first-child { white-space: nowrap; }
+kbd { display: inline-block; padding: 1px 6px; font: 12px/1.4 ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--bg); }

@@ -158,7 +158,8 @@ def test_fixture_shapes_and_thin_lines():
                      {"type": "toilet", "a": [100, 190], "b": [100, 150]}], 1.0, value=255, thickness=4)
     assert img[10, 35] > 0 and img[35, 35] == 0          # rectangle outline only
     assert img[50, 170] > 0 and img[50, 140] == 0        # circle outline only
-    assert img[190, 80] > 0 and img[150, 100] > 0        # toilet: flat side on the wall + bowl tip
+    # toilet ("D"): flat side on the wall (half width = depth / 2.6 ~ 15px), straight side, round front tip
+    assert img[190, 90] > 0 and img[190, 70] == 0 and img[175, 115] > 0 and img[150, 100] > 0
     thick, thin = np.zeros((50, 100), np.uint8), np.zeros((50, 100), np.uint8)
     draw_edits(thick, [{"type": "line", "pts": [[5, 25], [95, 25]]}], 1.0, value=255, thickness=10)
     draw_edits(thin, [{"type": "line", "pts": [[5, 25], [95, 25]], "thin": True}], 1.0, value=255, thickness=10)

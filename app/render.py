@@ -240,7 +240,7 @@ def _edit_points(e: dict) -> list:
     return []
 
 
-TOILET_ELONGATION = 1.3   # toilet bowl depth / half width (1.0 would be a plain semicircle)
+TOILET_ELONGATION = 2.6   # toilet depth / half width ("D" shape: straight sides, round front; 1.0 = plain semicircle)
 
 
 def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.0), value=1, thickness: int = 1) -> None:
@@ -264,14 +264,18 @@ def draw_edits(img: np.ndarray, edits: list[dict], scale: float, offset=(0.0, 0.
             cv2.circle(img, P(e["c"]), int(r * S), value, thickness, cv2.LINE_AA, shift=4)
             continue
         if t == "toilet":
-            # half ellipse: flat side on the wall at a, bowl reaching b; a bit longer than it is wide
+            # "D" shape: flat side on the wall at a, straight sides, semicircular front reaching b
             (ax, ay), (bx, by) = e["a"], e["b"]
             depth = math.hypot(bx - ax, by - ay)
-            half_w = depth / TOILET_ELONGATION
-            ang = math.degrees(math.atan2(by - ay, bx - ax))
-            nx, ny = -(by - ay) / (depth or 1), (bx - ax) / (depth or 1)
-            cv2.ellipse(img, P((ax, ay)), (int(depth * scale * S), int(half_w * scale * S)), ang, -90, 90, value, thickness, cv2.LINE_AA, shift=4)
-            cv2.line(img, P((ax - nx * half_w, ay - ny * half_w)), P((ax + nx * half_w, ay + ny * half_w)), value, thickness, cv2.LINE_AA, shift=4)
+            w = depth / TOILET_ELONGATION                       # half width = front radius
+            ux, uy = (bx - ax) / (depth or 1), (by - ay) / (depth or 1)
+            nx, ny = -uy, ux
+            cx, cy = ax + ux * (depth - w), ay + uy * (depth - w)   # centre of the front semicircle
+            ang = math.degrees(math.atan2(uy, ux))
+            for sgn in (1, -1):
+                cv2.line(img, P((ax + sgn * nx * w, ay + sgn * ny * w)), P((cx + sgn * nx * w, cy + sgn * ny * w)), value, thickness, cv2.LINE_AA, shift=4)
+            cv2.ellipse(img, P((cx, cy)), (int(w * scale * S), int(w * scale * S)), ang, -90, 90, value, thickness, cv2.LINE_AA, shift=4)
+            cv2.line(img, P((ax - nx * w, ay - ny * w)), P((ax + nx * w, ay + ny * w)), value, thickness, cv2.LINE_AA, shift=4)
             continue
         if t == "line" and len(e.get("pts", [])) >= 2:
             cv2.polylines(img, [np.array([P(p) for p in e["pts"]], np.int32)], False, value, thickness, cv2.LINE_AA, shift=4)
