@@ -390,8 +390,9 @@ def redetect_floor(pid: str, fid: str, body: AutoBody):
         raise HTTPException(404, "층이 없습니다")
     s = merged_settings(proj.get("settings"))
     kinds = tuple(k for k in body.kinds if k in AUTO_KINDS) if body.kinds is not None else auto_kinds(s)
+    # automatic items go first so the eraser strokes that follow still wipe them (edits are layered in order)
     manual = [e for e in fl.get("edits", []) if not e.get("auto")]
-    fl["edits"] = manual + (detect_edits(load_plan(d / fl["file"]), s, kinds) if kinds else [])
+    fl["edits"] = (detect_edits(load_plan(d / fl["file"]), s, kinds) if kinds else []) + manual
     save_project(pid, proj)
     return public_project(pid)
 

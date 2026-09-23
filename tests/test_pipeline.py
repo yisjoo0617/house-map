@@ -298,9 +298,14 @@ def test_auto_lines_replace_the_raster_and_the_eraser_clips_them(sample):
     assert a[33:41, 400].max() > 0.5               # the automatic line itself
     erased = structure_alpha(plan, s, auto + [{"type": "erase", "pts": [[400, 37]], "r": 20}], full, pw, ph, 3)
     assert erased[33:41, 400].max() < 0.05 and erased[33:41, 100].max() > 0.5
+    # edits are layered: the eraser wipes what was drawn before it, later items stay whole
     hand = structure_alpha(plan, s, auto + [{"type": "line", "pts": [[100, 300], [700, 300]]},
-                                            {"type": "erase", "pts": [[400, 300]], "r": 20}], full, pw, ph, 3)
-    assert hand[296:304, 400].max() > 0.5          # the eraser leaves hand-drawn lines alone
+                                            {"type": "erase", "pts": [[400, 300]], "r": 20},
+                                            {"type": "line", "pts": [[100, 500], [700, 500]]},
+                                            {"type": "erase", "pts": [[400, 500]], "r": 20},
+                                            {"type": "line", "pts": [[400, 480], [400, 520]]}], full, pw, ph, 3)
+    assert hand[296:304, 400].max() < 0.05 and hand[296:304, 200].max() > 0.5
+    assert hand[496:504, 388].max() < 0.05 and hand[485:490, 400].max() > 0.5   # drawn after the stroke: intact
 
 
 def test_fixture_symbols_draw_inside_their_box():
@@ -341,5 +346,5 @@ def test_upload_runs_auto_detection_and_redetect_api(sample):
     assert r.json()["floors"][0]["edits"] == [{"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}]
     r = client.post(f"/api/projects/{pid}/floors/{fl['id']}/auto", json={"kinds": ["doors"]})
     edits = r.json()["floors"][0]["edits"]
-    assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[0] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
+    assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[-1] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
     client.delete(f"/api/projects/{pid}")

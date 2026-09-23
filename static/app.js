@@ -889,6 +889,7 @@ function setMode(mode) {
 function setTool(tool) {
   state.tool = tool;
   for (const b of $$("[data-tool]")) b.classList.toggle("active", b.dataset.tool === tool);
+  if (state.mode === "draw") drawPlan();   // the delete tool reveals eraser strokes, the eraser its cursor
 }
 
 async function loadStruct() {
@@ -1258,30 +1259,65 @@ function drawFixture(ctx, e) {
   }
 }
 
+// eraser stroke as a path (a single click is a dot)
+function erasePath(ctx, pts) {
+  ctx.beginPath();
+  pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+  if (pts.length === 1) ctx.lineTo(pts[0][0] + 0.01, pts[0][1]);
+}
+
+// The lines are drawn on their own layer in order, and every eraser stroke really wipes what was drawn
+// before it (the automatic raster/vector lines and earlier hand-drawn items), just as the renderer does.
+// The strokes themselves leave no trace; only the delete tool shows them faintly so one can be removed.
+const inkLayer = document.createElement("canvas");
+
 function drawEditsLayer(ctx, u) {
-  ctx.lineCap = ctx.lineJoin = "round";
+  const s = planScale();
+  if (inkLayer.width !== planCv.width || inkLayer.height !== planCv.height) { inkLayer.width = planCv.width; inkLayer.height = planCv.height; }
+  const g = inkLayer.getContext("2d");
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, inkLayer.width, inkLayer.height);
+  g.globalCompositeOperation = "source-over";
+  if (state.structImgs[state.viewFloor]) g.drawImage(state.structImgs[state.viewFloor], 0, 0, inkLayer.width, inkLayer.height);
+  g.setTransform(s, 0, 0, s, 0, 0);
+  g.lineCap = g.lineJoin = "round";
+  const d = state.drawing;
+  const wipe = (pts, r) => {
+    g.globalCompositeOperation = "destination-out";
+    g.lineWidth = r * 2;
+    g.strokeStyle = "#000";
+    erasePath(g, pts);
+    g.stroke();
+    g.globalCompositeOperation = "source-over";
+  };
   for (const e of curEdits()) {
     if (e.type === "erase") {
-      ctx.strokeStyle = "rgba(236,72,153,.25)";
-      ctx.lineWidth = e.r * 2;
-      ctx.beginPath();
-      e.pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
-      if (e.pts.length === 1) ctx.lineTo(e.pts[0][0] + 0.01, e.pts[0][1]);
-      ctx.stroke();
+      wipe(e.pts, e.r);
     } else {
-      ctx.strokeStyle = e.auto ? "#dc2626" : "#2563eb";   // red = detected automatically, blue = drawn by hand
-      ctx.lineWidth = (e.thin ? 1.3 : 2.5) * u;
-      drawEditShape(ctx, e);
+      g.strokeStyle = e.auto ? "#dc2626" : "#2563eb";   // red = detected automatically, blue = drawn by hand
+      g.lineWidth = (e.thin ? 1.3 : 2.5) * u;
+      drawEditShape(g, e);
     }
   }
-  const d = state.drawing;
+  if (d?.type === "erase") wipe(d.pts, d.r);            // the stroke being drawn erases live
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(inkLayer, 0, 0);
+  ctx.restore();
+
+  ctx.lineCap = ctx.lineJoin = "round";
+  if (state.tool === "delete") {   // only here: where the eraser went, so a stroke can be picked and removed
+    for (const e of curEdits()) {
+      if (e.type !== "erase") continue;
+      ctx.strokeStyle = "rgba(236,72,153,.22)";
+      ctx.lineWidth = e.r * 2;
+      erasePath(ctx, e.pts);
+      ctx.stroke();
+    }
+  }
   if (d && d.type !== "flip" && d.type !== "move") {
     if (d.type === "erase") {
-      ctx.strokeStyle = "rgba(236,72,153,.45)";
-      ctx.lineWidth = d.r * 2;
-      ctx.beginPath();
-      d.pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
-      ctx.stroke();
+      // nothing to draw: the ink layer above already shows the stroke wiping the lines
     } else {
       const shape = previewShape(d);
       const thin = d.type === "thinline" || (["toilet", "rect", "circle", ...FIXTURES].includes(d.type) && $("#shapesThin").checked);
@@ -1337,8 +1373,7 @@ function drawPlan() {
     ctx.drawImage(img, 0, 0, planCv.width, planCv.height);
     ctx.globalAlpha = 1;
   }
-  if (drawing && state.structImgs[state.viewFloor]) ctx.drawImage(state.structImgs[state.viewFloor], 0, 0, planCv.width, planCv.height);
-  ctx.setTransform(s, 0, 0, s, 0, 0);
+  ctx.setTransform(s, 0, 0, s, 0, 0);   // in draw mode the detected raster lines go onto the ink layer (drawEditsLayer)
 
   if (drawing) {
     drawEditsLayer(ctx, u);
@@ -1690,6 +1725,14 @@ document.addEventListener("keydown", (e) => {
   if (state.mode === "draw") {
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") { e.preventDefault(); undoEdit(); return; }
     if (TOOL_KEYS[e.code] && !e.ctrlKey && !e.metaKey) { setTool(TOOL_KEYS[e.code]); return; }
+    if (e.code === "BracketLeft" || e.code === "BracketRight") {   // [ / ] = smaller / bigger eraser
+      const inp = $("#eraseSize");
+      inp.value = Math.max(+inp.min, Math.min(+inp.max, +inp.value + (e.code === "BracketRight" ? 3 : -3)));
+      flash(`지우개 크기 ${inp.value}`);
+      if (state.tool !== "erase") setTool("erase");
+      drawPlan();
+      return;
+    }
     if (e.code === "Delete" || e.code === "Backspace") return;
   }
   if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }

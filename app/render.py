@@ -387,7 +387,6 @@ def structure_alpha(plan: np.ndarray, settings: dict, edits: list[dict], crop: t
     W2, H2 = iw * 2, ih * 2
     sc2 = W2 / (cx1 - cx0)  # plan px -> 2x panel px
     auto = [e for e in edits if e.get("auto") and e.get("type") != "erase"]
-    manual = [e for e in edits if not e.get("auto") and e.get("type") != "erase"]
 
     canvas = np.zeros((H2, W2), np.float32)
     if auto:
@@ -410,13 +409,15 @@ def structure_alpha(plan: np.ndarray, settings: dict, edits: list[dict], crop: t
     if settings["uniform_lines"] and src.size:
         canvas = cv2.dilate(canvas, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
     if with_vectors:
-        if auto:
-            vec = np.zeros((H2, W2), np.uint8)
-            draw_edits(vec, auto, sc2, (cx0 * sc2, cy0 * sc2), 255, d)
-            erase_strokes(vec, edits, sc2, (cx0 * sc2, cy0 * sc2))   # the eraser clips automatic lines only
-            canvas = np.maximum(canvas, vec.astype(np.float32) / 255)
+        # edits are layered in order: an eraser stroke wipes everything drawn before it (the raster and
+        # any earlier vector items); items drawn after it stay whole
         vec = np.zeros((H2, W2), np.uint8)
-        draw_edits(vec, manual, sc2, (cx0 * sc2, cy0 * sc2), 255, d)
+        offset = (cx0 * sc2, cy0 * sc2)
+        for e in edits:
+            if e.get("type") == "erase":
+                erase_strokes(vec, [e], sc2, offset)
+            else:
+                draw_edits(vec, [e], sc2, offset, 255, d)
         canvas = np.maximum(canvas, vec.astype(np.float32) / 255)
     canvas = cv2.GaussianBlur(canvas, (3, 3), 0)
     return np.clip(cv2.resize(canvas, (iw, ih), interpolation=cv2.INTER_AREA) * 1.3, 0, 1)
