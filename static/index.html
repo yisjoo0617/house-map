@@ -25,8 +25,8 @@
       깔끔한 직선과 곡선으로 그려 둡니다(① 도면 다듬기에서 빨간 선). 잘못 잡힌 것은 지우고 빠진 것은 도구로 그리면 됩니다.</li>
     <li><b>② 방</b>: 도면에서 이름을 놓을 깨끗한 자리를 클릭하고 방 이름을 입력하면, 미니맵의 바로 그 자리에 이름이 표시됩니다. 드래그로 옮기고, 우클릭하면 삭제합니다.</li>
     <li><b>③ 이동 지점</b>: 마커가 지나갈 자리를 차례로 클릭해 하나의 경로를 만듭니다. 첫 클릭이 <b>⌂ 시작 지점</b>(영상 처음부터 마커가 있는 곳),
-      그다음 클릭부터는 <b>도착 지점</b>입니다(방 점을 클릭하면 그 위치). 지점마다 <b>도착</b>·<b>출발</b> 시각이 있어 마커는 도착~출발 사이에 머물고,
-      출발 시각에 떠나 다음 지점의 도착 시각에 닿습니다(속도 자동). 지점을 클릭해 선택하면 옆에 시간 칸이 보이고, <b>⏺ 현재</b>를 누르면 선택한 칸에 지금 재생 시각이 들어갑니다.
+      그다음 클릭부터는 경로 끝에 붙는 지점입니다(방 점을 클릭하면 그 위치). 지점마다 <b>시작</b>(마커가 닿는 시각)·<b>종료</b>(떠나는 시각)가 있어 마커는 시작~종료 사이에 머물고,
+      종료 시각에 떠나 다음 지점의 시작 시각에 닿습니다(속도 자동). 지점을 클릭하면 옆에 시간 칸이 열리고 <b>종료</b> 칸이 먼저 선택됩니다. <b>⏺ 현재</b>를 누르면 선택한 칸에 지금 재생 시각이 들어갑니다.
       앞 이동의 끝과 다음 이동의 시작은 항상 같은 지점입니다. 드래그로 옮기고, 선 근처를 클릭하면 사이에 끼워 넣고, 우클릭이나 <kbd>Del</kbd>로 삭제합니다.</li>
     <li><b>④ 경로 꺾기</b>: ③에서 만든 이동이 벽을 가로지르면 선 근처를 클릭해 꺾는 점을 찍습니다.</li>
     <li>타임라인의 ▷■ 이동 지점은 드래그해서 시각을 조정할 수 있습니다. <span class="sug">주황 표시</span>는 AI가 추천한 이동 시점입니다.</li>
@@ -63,8 +63,8 @@
     <table>
       <caption>③ 이동 지점</caption>
       <tr><td>클릭</td><td>빈 곳 = 경로 끝에 지점 추가 · 선 근처 = 사이에 끼워 넣기 · 지점 = 선택</td></tr>
-      <tr><td>⏺ 현재</td><td>선택한 시간 칸(도착/출발)에 지금 재생 시각 넣기</td></tr>
-      <tr><td>더블클릭</td><td>그 지점의 도착 시각으로 영상 이동</td></tr>
+      <tr><td>⏺ 현재</td><td>선택한 시간 칸(시작/종료)에 지금 재생 시각 넣기</td></tr>
+      <tr><td>더블클릭</td><td>그 지점의 시작 시각으로 영상 이동</td></tr>
       <tr><td>우클릭 / <kbd>Del</kbd></td><td>지점 삭제 (앞뒤 지점이 바로 이어짐)</td></tr>
     </table>
   </div>
@@ -169,7 +169,7 @@
       <label class="chk"><input type="checkbox" id="previewToggle" checked /> 미니맵 미리보기</label>
     </div>
     <canvas id="timeline" height="64"></canvas>
-    <div class="legend"><span class="lg-fm"></span>③ 경로 ■도착 ▷출발(드래그 가능) · <span class="lg-mv"></span>마커 이동 중 · <span class="lg-sug"></span>AI 추천 시점(클릭하면 이동)</div>
+    <div class="legend"><span class="lg-fm"></span>③ 경로 ■시작 ▷종료(드래그 가능) · <span class="lg-mv"></span>마커 이동 중 · <span class="lg-sug"></span>AI 추천 시점(클릭하면 이동)</div>
   </div>
 
   <div class="col-right">
@@ -177,7 +177,7 @@
       <div class="mode-tabs">
         <button data-mode="draw" class="active" title="자동 인식된 벽·문·계단을 다듬고 빠진 것을 그립니다">① 도면 다듬기</button>
         <button data-mode="rooms" title="미니맵에 표시될 방 이름과 위치">② 방</button>
-        <button data-mode="moves" title="마커가 지나갈 지점을 차례로 찍고 지점마다 도착·출발 시각을 정합니다">③ 이동 지점</button>
+        <button data-mode="moves" title="마커가 지나갈 지점을 차례로 찍고 지점마다 시작·종료 시각을 정합니다">③ 이동 지점</button>
         <button data-mode="route" title="③에서 만든 이동 경로를 찍은 점에서 꺾습니다">④ 경로 꺾기</button>
       </div>
       <div class="floor-tabs" id="floorTabs"></div>
@@ -190,12 +190,12 @@
       </div>
       <div id="moveBar" class="drawbar hidden">
         <div class="tools">
-          <button id="moveNowBtn" class="primary" title="선택한 시간 칸(도착 또는 출발)에 지금 재생 시각을 넣습니다. 도착을 넣으면 출발 칸이 이어서 선택됩니다">⏺ 현재</button>
+          <button id="moveNowBtn" class="primary" title="선택한 시간 칸(시작 또는 종료)에 지금 재생 시각을 넣습니다. 시작을 넣으면 종료 칸이 이어서 선택됩니다">⏺ 현재</button>
           <span id="moveSel" class="muted">지점을 클릭해서 선택하세요</span>
           <button id="moveDelBtn" title="선택한 지점을 삭제합니다 (Del). 앞뒤 지점이 바로 이어집니다">✕ 지점 삭제</button>
         </div>
         <div class="tools opts">
-          <span>마커가 지나갈 자리를 차례로 클릭하세요. 첫 클릭 = ⌂ 시작 지점(영상 처음부터 여기), 다음 클릭부터 = 도착 지점 · 지점에 닿는 순간 클릭 → 떠나는 순간에 ⏺ 현재 → 다음 자리 클릭 · 이동 시간은 앞 지점 출발 ~ 이 지점 도착 사이로 자동</span>
+          <span>마커가 지나갈 자리를 차례로 클릭하세요. 첫 클릭 = ⌂ 첫 지점(영상 처음부터 여기) · 시작 = 지점에 닿는 시각, 종료 = 떠나는 시각 · 닿는 순간 클릭 → 떠나는 순간에 ⏺ 현재 → 다음 자리 클릭 · 이동 시간은 앞 지점 종료 ~ 이 지점 시작 사이로 자동</span>
         </div>
       </div>
       <div id="drawBar" class="drawbar">
@@ -254,7 +254,7 @@
 
     <div class="card">
       <h3>이동 경로 <small id="mvCount" class="muted"></small> <small class="muted">(③에서 도면을 클릭해 추가)</small></h3>
-      <div class="evscroll"><table id="mvTable"><thead><tr><th>#</th><th>도착</th><th>출발</th><th>앞 지점에서 이동</th><th></th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="evscroll"><table id="mvTable"><thead><tr><th>#</th><th>시작</th><th>종료</th><th>앞 지점에서 이동</th><th></th><th></th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <div class="card">
@@ -331,6 +331,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=35"></script>
+<script src="/static/app.js?v=36"></script>
 </body>
 </html>

@@ -639,7 +639,7 @@ function updatePlanHint() {
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
-        ? "⌂ 시작 지점 · ● 지나는 지점 · 빈 곳 클릭 = 경로 끝에 지점 추가 (방 점을 클릭하면 그 위치) · 선 근처 클릭 = 그 사이에 지점 끼워 넣기 · 지점 클릭 = 선택(도착·출발 시간 칸 표시, ⏺ 현재로 기록) · 드래그 = 옮기기 (앞뒤 이동이 함께 따라옵니다) · 더블클릭 = 그 시각으로 · 우클릭/Del = 지점 삭제"
+        ? "⌂ 첫 지점 · ● 지나는 지점 · 빈 곳 클릭 = 경로 끝에 지점 추가 (방 점을 클릭하면 그 위치) · 선 근처 클릭 = 그 사이에 지점 끼워 넣기 · 지점 클릭 = 선택 (시작·종료 시간 칸이 열리고 종료 칸이 먼저 선택됨, ⏺ 현재로 기록) · 드래그 = 옮기기 (앞뒤 이동이 함께 따라옵니다) · 더블클릭 = 그 시각으로 · 우클릭/Del = 지점 삭제"
         : "빈 곳 클릭 = 그 자리에 방 이름 표시 (선이 없는 깨끗한 곳을 고르세요) · 드래그 = 위치 수정 · 우클릭 = 삭제 · 마커 이동은 ③ 이동 지점에서";
 }
 
@@ -708,10 +708,10 @@ planCv.addEventListener("pointerdown", (e) => {
   const p = planPoint(e);
   if (state.mode === "moves") {
     const pt = hitPathPoint(p);
-    if (pt) {   // a click selects the point (its time boxes appear); a drag moves it, both legs follow
+    if (pt) {   // a click selects the point (its time boxes appear, 종료 first); a drag moves it, both legs follow
       planCv.setPointerCapture(e.pointerId);
       state.drag = { pt, start: p, moved: false };
-      setActive(pt, null);
+      setActive(pt, "depart");
       return;
     }
     const leg = hitLeg(p);
@@ -804,6 +804,7 @@ planCv.addEventListener("pointerup", (e) => {
   if (!d) return;
   if (d.via != null) { if (d.moved) saveRoomsMoves(); else state.routeUndo.pop(); return; }
   if (d.moved) saveRoomsMoves();   // a plain click on a room / point only selects it
+  else if (d.pt) focusActiveBox();   // ...and puts the cursor in the selected time box (종료) beside the point
 });
 
 // double-click a path point: jump the video to its arrival (the first point: its departure)
@@ -851,7 +852,7 @@ const cssPx = () => viewImg().width / planCv.getBoundingClientRect().width;
 const ptById = (id) => state.path.find((q) => q.id === id);
 const ptIndex = (pt) => state.path.indexOf(pt);
 const nowT = () => +video.currentTime.toFixed(2);
-const FIELD_LABEL = { arrive: "도착", depart: "출발" };
+const FIELD_LABEL = { arrive: "시작", depart: "종료" };   // 시작 = when the marker reaches the point, 종료 = when it leaves
 
 // which time boxes a point has: the first point only departs, every other point arrives and departs
 const ptFields = (pt) => (ptIndex(pt) === 0 ? ["depart"] : ["arrive", "depart"]);
@@ -881,6 +882,12 @@ function setActive(pt, field) {
 
 const firstEmptyField = (pt) => ptFields(pt).find((f) => pt[f] == null) || ptFields(pt)[0];
 
+// the cursor goes into the active time box beside the point, text selected so typing replaces it
+function focusActiveBox() {
+  const inp = $("#planLabels input.active");
+  if (inp && document.activeElement !== inp) { inp.focus(); inp.select(); }
+}
+
 function refreshActiveMarks() {
   const ap = activePoint();
   for (const tr of $$("#mvTable tbody tr[data-pt]")) tr.classList.toggle("active", tr.dataset.pt === state.active?.id);
@@ -893,7 +900,7 @@ function refreshActiveMarks() {
     : "지점을 클릭해서 선택하세요";
 }
 
-const ptName = (pt) => (ptIndex(pt) === 0 ? "⌂ 시작 지점" : `지점 ${ptIndex(pt)}`);
+const ptName = (pt) => (ptIndex(pt) === 0 ? "⌂ 첫 지점" : `지점 ${ptIndex(pt)}`);
 
 // nearest path point on the floor being viewed
 function hitPathPoint(p) {
@@ -935,8 +942,8 @@ const newPoint = (p) => ({ id: "p" + Math.random().toString(36).slice(2, 8), ...
 // "click the spot on arrival, scrub, ⏺ 현재 on leaving, click the next spot" is the whole rhythm.
 function appendPoint(p) {
   const pt = newPoint(p);
-  if (!state.path.length) { pt.depart = nowT(); flash(`⌂ 시작 지점 · 출발 ${fmtTime(pt.depart)} (떠나는 순간에 ⏺ 현재)`); }
-  else { pt.arrive = nowT(); flash(`지점 ${state.path.length} · 도착 ${fmtTime(pt.arrive)} · 떠나는 순간에 ⏺ 현재`); }
+  if (!state.path.length) { pt.depart = nowT(); flash(`⌂ 첫 지점 · 종료 ${fmtTime(pt.depart)} (떠나는 순간에 ⏺ 현재)`); }
+  else { pt.arrive = nowT(); flash(`지점 ${state.path.length} · 시작 ${fmtTime(pt.arrive)} · 떠나는 순간에 ⏺ 현재`); }
   state.path.push(pt);
   state.active = { id: pt.id, field: "depart" };
   saveRoomsMoves();
@@ -950,7 +957,7 @@ function insertPoint(p, k) {
   delete state.path[k + 1].via;   // the leg after it changed shape: its old bends no longer fit
   state.active = { id: pt.id, field: "depart" };
   saveRoomsMoves();
-  flash(`지점 ${k} 끼워 넣음 · 도착 ${fmtTime(pt.arrive)}`);
+  flash(`지점 ${k} 끼워 넣음 · 시작 ${fmtTime(pt.arrive)}`);
 }
 
 // ⏺ 현재: the active time box takes the playback time; after an arrival the departure box is next
@@ -990,9 +997,9 @@ function legInfo(pt) {
   const prev = state.path[k - 1];
   const bits = [];
   const start = prev.depart ?? (k > 1 ? prev.arrive : 0), end = pt.arrive;
-  if (end == null) bits.push(`<span class="warn">⚠ 도착 시각 없음 (떠나는 순간 바로 나타남)</span>`);
-  else if (start != null && end < start) bits.push(`<span class="warn">⚠ 도착이 앞 지점 출발(${fmtTime(start)})보다 앞</span>`);
-  else if (start != null) bits.push(`<span title="출발·도착 시각으로 속도가 자동으로 정해집니다">${(end - start).toFixed(1)}초 ${prev.floor !== pt.floor ? "층 이동 (스르르)" : pt.mode === "jump" ? "스르르" : "이동"}</span>`);
+  if (end == null) bits.push(`<span class="warn">⚠ 시작 시각 없음 (앞 지점을 떠나는 순간 바로 나타남)</span>`);
+  else if (start != null && end < start) bits.push(`<span class="warn">⚠ 시작이 앞 지점 종료(${fmtTime(start)})보다 앞</span>`);
+  else if (start != null) bits.push(`<span title="앞 지점 종료 ~ 이 지점 시작 사이로 속도가 자동으로 정해집니다">${(end - start).toFixed(1)}초 ${prev.floor !== pt.floor ? "층 이동 (스르르)" : pt.mode === "jump" ? "스르르" : "이동"}</span>`);
   const leg = legs()[k - 1];
   if (pt.via?.length && canBend(leg)) bits.push(`<span class="mvroute-row">↩ 꺾임 ${pt.via.length}<button data-pt-route-clear="${pt.id}" class="mvroute-clear" title="꺾은 점을 모두 지우고 직선으로 되돌립니다">초기화</button></span>`);
   return `<div class="mv">${bits.join(" · ")}</div>`;
@@ -1001,10 +1008,10 @@ function legInfo(pt) {
 // how long the marker rests here
 function stayInfo(pt) {
   const k = ptIndex(pt), last = k === state.path.length - 1;
-  if (pt.depart == null) return last ? "" : `<span class="warn">⚠ 출발 시각 없음 (도착하자마자 떠남)</span>`;
+  if (pt.depart == null) return last ? "" : `<span class="warn">⚠ 종료 시각 없음 (시작하자마자 떠남)</span>`;
   if (k === 0) return "";
   if (pt.arrive == null) return "";
-  if (pt.depart < pt.arrive) return `<span class="warn">⚠ 출발이 도착보다 앞</span>`;
+  if (pt.depart < pt.arrive) return `<span class="warn">⚠ 종료가 시작보다 앞</span>`;
   return `머묾 ${(pt.depart - pt.arrive).toFixed(1)}초`;
 }
 
@@ -1074,7 +1081,11 @@ function bindTimeInputs(root) {
     pt[field] = parseTime(inp.value);
     saveRoomsMoves();
   });
-  root.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("[data-pt-time]")) e.target.blur(); });
+  root.addEventListener("keydown", (e) => {
+    if (!e.target.matches("[data-pt-time]")) return;
+    if (e.key === "Enter" || e.key === "Escape") e.target.blur();
+    else if (e.key === " ") { e.preventDefault(); e.target.blur(); video.paused ? video.play() : video.pause(); }
+  });
 }
 bindTimeInputs($("#mvTable"));
 bindTimeInputs($("#planLabels"));
@@ -1086,7 +1097,7 @@ function showFloor(fid) {
   drawPlan();
 }
 
-// The time boxes beside the selected point on the plan (도착 / 출발). The element is kept and only moved /
+// The time boxes beside the selected point on the plan (시작 / 종료). The element is kept and only moved /
 // re-marked, so typing in it survives redraws (drawPlan runs on every tick while the video plays).
 function syncPointLabels() {
   const box = $("#planLabels");
@@ -2216,7 +2227,7 @@ timeline.addEventListener("pointermove", (e) => {
   timeline.style.cursor = mp ? "ew-resize" : "pointer";
   timeline.title = mp ? `${ptName(mp.pt)} ${FIELD_LABEL[mp.field]} ${fmtTime(mp.t)} (드래그로 조정)`
     : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
-    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} 출발 ${fmtTime(mv.start)} → 도착 ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
+    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} ${fmtTime(mv.start)} → ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
     : win ? `${fmtTime(t)} · ${win}` : fmtTime(t);
 });
 
