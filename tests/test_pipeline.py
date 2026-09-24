@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.motion import analyze_video  # noqa: E402
 from app.render import Minimap, auto_trim, load_plan, merged_settings, render_outputs  # noqa: E402
-from app.track import compute_room_track  # noqa: E402
+from app.track import compute_track, plan_moves  # noqa: E402
 
 SAMPLE = ROOT / "tests" / "sample"
 ROOMS = [
@@ -34,27 +34,34 @@ def sample():
     return SAMPLE
 
 
-def test_room_track_rests_and_glides():
-    events = [{"t": 0, "room": "a"}, {"t": 5, "room": "b"}]
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], np.array([0, 4.5, 5.0, 5.5, 9]),
-                            {"move_timing": "time", "transition_sec": 1.0})
-    assert tr["x"].tolist()[:2] == [100, 100]          # resting in 거실
-    assert tr["x"][2] == pytest.approx(200)            # half-way at the recorded moment
-    assert tr["x"][3] == 300 and tr["x"][4] == 300     # arrived in 주방
+def MV(a, b, t0, t1, **extra):
+    """A move between two of ROOMS' positions (room ids) or explicit points."""
+    pt = lambda r: {"floor": r["floor"], "x": r["x"], "y": r["y"]} if isinstance(r, dict) else next(
+        {"floor": q["floor"], "x": q["x"], "y": q["y"]} for q in ROOMS if q["id"] == r)
+    return {"id": f"{a if isinstance(a, str) else 'p'}-{b if isinstance(b, str) else 'p'}-{t0}", "a": pt(a), "b": pt(b), "t0": t0, "t1": t1, **extra}
 
 
-def test_room_track_jump_and_floor_change():
-    events = [{"t": 1, "room": "a"}, {"t": 3, "room": "c"}]
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], np.array([0, 2.6, 3.4, 4]),
-                            {"move_timing": "time", "transition_sec": 1.0, "fade_sec": 0.6})
-    assert tr["floor"].tolist() == [0, 0, 1, 1]        # stairs: switch during the fade, no glide across floors
-    assert tr["x"][0] == 100                           # before the first record: starting room
-    assert tr["x"][2] == 50
+def test_track_rests_then_walks_between_the_two_times():
+    tr = compute_track([MV("a", "b", 4.0, 6.0)], ["f1", "f2"], np.array([0, 3.9, 4.0, 5.0, 6.0, 9]))
+    assert tr["x"].tolist()[:3] == [100, 100, 100]     # waits at the start point (also before the first move)
+    assert tr["x"][3] == pytest.approx(200)            # half-way at the middle of the window: speed follows the times
+    assert tr["x"][4] == 300 and tr["x"][5] == 300     # arrived at t1 and stays
+    assert tr["moves"][0]["kind"] == "walk" and tr["moves"][0]["id"] == "a-b-4.0"
 
 
-def test_room_track_empty_and_unknown_rooms():
-    assert compute_room_track(ROOMS, [], ["f1"], np.array([0.0])) is None
-    assert compute_room_track(ROOMS, [{"t": 0, "room": "zzz"}], ["f1"], np.array([0.0])) is None
+def test_track_floor_change_fades():
+    tr = compute_track([MV("a", "c", 2.0, 3.0)], ["f1", "f2"], np.array([1.0, 2.2, 2.8, 3.5]), {})
+    assert tr["floor"].tolist() == [0, 0, 1, 1] and tr["moves"][0]["kind"] == "fade"   # floors change by fading, no glide
+    assert tr["alpha"][1] < 1 and tr["alpha"][3] == 1
+    assert tr["x"][0] == 100 and tr["x"][3] == 50
+
+
+def test_track_empty_incomplete_and_unknown_floors():
+    assert compute_track([], ["f1"], np.array([0.0])) is None
+    half = [{"id": "m1", "a": {"floor": "f1", "x": 1, "y": 1}, "b": None, "t0": 1.0, "t1": None}]
+    assert compute_track(half, ["f1"], np.array([0.0])) is None                     # end point not placed yet
+    assert compute_track([MV("a", "c", 1.0, 2.0)], ["f1"], np.array([0.0])) is None  # a point on a floor that is gone
+    assert compute_track([MV("a", "b", 5.0, 5.0)], ["f1"], np.array([0.0])) is None  # arrival not after departure
 
 
 def test_motion_analysis_suggests_stops(sample):
@@ -81,8 +88,8 @@ def test_chalk_minimap_turns_dark_lines_white(sample):
 def test_render_all_outputs(sample, tmp_path):
     floors = [{"id": "f1", "label": "1F", "path": sample / "plan_1f.png"},
               {"id": "f2", "label": "2F", "path": sample / "plan_2f.png"}]
-    events = [{"t": 0, "room": "a"}, {"t": 4, "room": "b"}, {"t": 8, "room": "c"}]
-    files = render_outputs(sample / "walk.mp4", floors, ROOMS, events, {}, "Signature house mini map",
+    moves = [MV("a", "b", 2, 4), MV("b", "c", 6, 8)]
+    files = render_outputs(sample / "walk.mp4", floors, ROOMS, moves, {}, "Signature house mini map",
                            tmp_path, ["composite", "overlay", "minimap"])
     assert set(files) == {"composite.mp4", "overlay.mov", "minimap_1F.png", "minimap_2F.png", "plan_1F.png", "plan_2F.png"}
     for f in files:
@@ -174,53 +181,40 @@ def test_fixture_shapes_and_thin_lines():
 
 
 def test_walk_bends_at_the_moves_via_points():
-    from app.track import plan_moves
-    rooms = [{"id": "a", "floor": "f1", "x": 0, "y": 0}, {"id": "b", "floor": "f1", "x": 400, "y": 0}]
-    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "b", "via": [[0, 300], [400, 300]]}]
-    s = {"move_timing": "speed", "cross_sec": 10.0, "move_anchor": "start"}
-    moves, _, _ = plan_moves(rooms, events, ["f1"], s, None, {"f1": 1000.0})
-    assert moves[0]["poly"].tolist() == [[0, 0], [0, 300], [400, 300], [400, 0]]   # straight legs through the bends
-    assert moves[0]["end"] - moves[0]["start"] == pytest.approx(10.0)             # 1000px at 100px/s (not the 400px line)
+    p0, p1 = {"floor": "f1", "x": 0, "y": 0}, {"floor": "f1", "x": 400, "y": 0}
+    planned = plan_moves([MV(p0, p1, 0.0, 10.0, via=[[0, 300], [400, 300]])], ["f1"])
+    assert planned[0]["poly"].tolist() == [[0, 0], [0, 300], [400, 300], [400, 0]]   # straight legs through the bends
+    tr = compute_track([MV(p0, p1, 0.0, 10.0, via=[[0, 300], [400, 300]])], ["f1"], np.array([5.0]))
+    assert tr["y"][0] == 300                                                          # half-way along the bent route
 
 
-def test_speed_mode_scales_duration_with_route_length():
-    from app.track import plan_moves
-    rooms = [{"id": "a", "floor": "f1", "x": 0, "y": 0}, {"id": "b", "floor": "f1", "x": 100, "y": 0},
-             {"id": "c", "floor": "f1", "x": 500, "y": 0}]
-    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "b"}, {"t": 20, "room": "c"}]
-    s = {"move_timing": "speed", "cross_sec": 10.0, "move_anchor": "start"}
-    moves, _, _ = plan_moves(rooms, events, ["f1"], s, None, {"f1": 1000.0})
-    d1, d2 = (m["end"] - m["start"] for m in moves)
-    assert d1 == pytest.approx(1.0) and d2 == pytest.approx(4.0)   # 100px and 400px at 100px/s
-    assert moves[0]["start"] == 10 and moves[1]["start"] == 20      # anchor = start of the move
-
-
-def test_jump_fades_out_and_in_and_modes_can_be_set_per_move():
-    events = [{"t": 0, "room": "a"}, {"t": 5, "room": "b", "mode": "jump"}, {"t": 9, "room": "a"}]
-    s = {"transition": "slide", "move_timing": "time", "transition_sec": 1.0, "fade_sec": 1.0}
-    t = np.array([4.0, 4.5, 4.75, 5.25, 5.5, 6.0, 9.0])
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, s)
+def test_jump_mode_fades_instead_of_walking():
+    t = np.array([4.0, 4.5, 4.75, 5.25, 5.5, 6.0, 9.5])
+    tr = compute_track([MV("a", "b", 4.5, 5.5, mode="jump"), MV("b", "a", 9.0, 10.0)], ["f1", "f2"], t)
     a = tr["alpha"]
     assert a[0] == 1 and a[1] == pytest.approx(1, abs=1e-6)          # before the fade
-    assert a[2] < 0.6 and tr["x"][2] == 100                            # fading out in the old room
-    assert a[3] < 0.6 and tr["x"][3] == 300                            # fading in at the new room (no sliding)
+    assert a[2] < 0.6 and tr["x"][2] == 100                            # fading out at the start point
+    assert a[3] < 0.6 and tr["x"][3] == 300                            # fading in at the end point (no sliding)
     assert a[4] == 1 and a[5] == 1
-    assert 100 < tr["x"][6] < 300 and a[6] == 1                         # the next move walks (default)
-    kinds = [m["kind"] for m in tr["moves"]]
-    assert kinds == ["fade", "walk"]
+    assert 100 < tr["x"][6] < 300 and a[6] == 1                        # the next move walks (default)
+    assert [m["kind"] for m in tr["moves"]] == ["fade", "walk"]
 
 
-def test_floor_change_fades():
-    events = [{"t": 0, "room": "a"}, {"t": 5, "room": "c"}]
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], np.array([4.8, 5.0, 5.2]), {"fade_sec": 1.0})
-    assert tr["floor"].tolist() == [0, 1, 1] and tr["alpha"][0] < 1 and tr["alpha"][2] < 1
+def test_move_from_elsewhere_fades_over_first():
+    # 거실 -> 주방 at 4~6, then a move that starts at 안방's spot on the same floor? no: at a third point on f1
+    p = {"floor": "f1", "x": 300, "y": 300}
+    planned = plan_moves([MV("a", "b", 4.0, 6.0), MV(p, "a", 10.0, 12.0)], ["f1", "f2"], {"fade_sec": 0.5})
+    kinds = [(m["kind"], m.get("hop", False), round(m["start"], 2), round(m["end"], 2)) for m in planned]
+    assert kinds == [("walk", False, 4.0, 6.0),
+                     ("fade", True, 9.5, 10.0),         # 주방 -> the new start point, just before the move
+                     ("walk", False, 10.0, 12.0)]
+    assert planned[2]["from"] == p and planned[1]["from"]["x"] == 300 and planned[1]["from"]["y"] == 100
 
 
 def test_show_windows_choose_the_plan_and_ease_in_and_out():
-    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "c"}]          # marker: f1 until ~10s, then f2
+    moves = [MV("a", "c", 10.0, 11.0)]                                # marker: f1 until ~10s, then f2
     t = np.array([0.0, 1.0, 1.3, 2.0, 5.0, 7.7, 8.0, 8.3, 9.0, 12.0, 14.7, 15.0, 16.0])
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, {"fade_sec": 1.0, "panel_fade_sec": 0.6},
-                            windows=[(1.0, 8.0), (8.0, 15.0)])
+    tr = compute_track(moves, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(1.0, 8.0), (8.0, 15.0)])
     pf, pa = tr["pfloor"], tr["panel"]
     assert pf[0] == -1 and pa[0] == 0                                  # nothing on screen before any window
     assert pf[1] == 0 and pa[1] == 0 and 0.4 < pa[2] < 0.6 and pa[3] == 1   # 1F eases in from 1.0
@@ -232,9 +226,8 @@ def test_show_windows_choose_the_plan_and_ease_in_and_out():
 
 
 def test_floor_without_window_follows_the_marker():
-    events = [{"t": 0, "room": "a"}, {"t": 10, "room": "c"}]
     t = np.array([0.0, 5.0, 9.0, 12.0, 20.0, 30.0])
-    tr = compute_room_track(ROOMS, events, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
+    tr = compute_track([MV("a", "c", 10.0, 11.0)], ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
     assert tr["pfloor"].tolist() == [0, 0, 0, 1, 1, -1]                # auto 1F, then 2F's window, then nothing
     assert tr["panel"][0] == 1                                         # no fade-in at the very start of the video
 

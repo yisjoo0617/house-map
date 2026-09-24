@@ -47,7 +47,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr)
 #timeline { width: 100%; height: 64px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; cursor: pointer; display: block; }
 .legend { font-size: 12px; color: var(--muted); margin-top: 4px; display: flex; gap: 6px; align-items: center; }
 .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-left: 8px; }
-.lg-kf { background: var(--accent); } .lg-sug { background: var(--sug); } .lg-mv { background: rgba(37, 99, 235, .85); height: 6px; }
+.lg-fm { background: #2563eb; border-radius: 50% !important; } .lg-sug { background: var(--sug); } .lg-mv { background: rgba(37, 99, 235, .85); height: 6px; }
 .sug { color: var(--sug); font-weight: 600; }
 
 #plan { width: 100%; display: block; cursor: crosshair; border-radius: 8px; background: #fff; touch-action: none; }
@@ -65,17 +65,11 @@ progress { width: 160px; vertical-align: middle; }
 .floor-show label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); }
 .floor-show input { width: 68px; padding: 2px 5px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
 .floor-show button { font-size: 12px; padding: 2px 7px; white-space: nowrap; }
-#roomBar { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
-#roomBar button { display: inline-flex; gap: 6px; align-items: center; }
-#roomBar button.current { outline: 2px solid var(--accent-2); }
-#roomBar kbd { font: 11px/1 monospace; padding: 2px 4px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
-#roomTable, #evTable { width: 100%; border-collapse: collapse; font-size: 13px; }
-#roomTable th, #roomTable td, #evTable th, #evTable td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+#roomTable, #mvTable { width: 100%; border-collapse: collapse; font-size: 13px; }
+#roomTable th, #roomTable td, #mvTable th, #mvTable td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
 #roomTable input { width: 100%; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
-#evTable select { padding: 2px 4px; }
-#evTable tr.active td { background: rgba(37, 99, 235, .1); }
-#roomTable td button, #evTable td button { padding: 1px 7px; }
+#roomTable td button, #mvTable td button { padding: 1px 7px; font-size: 12px; white-space: nowrap; }
 .evscroll { max-height: 260px; overflow: auto; }
 #flash { color: #16a34a; font-weight: 600; opacity: 0; transition: opacity .3s; } #flash.on { opacity: 1; }
 .preset-row { gap: 6px; } .preset-row select { flex: 1; min-width: 140px; }
@@ -139,7 +133,7 @@ dialog h2 { margin: 0 0 4px; font-size: 18px; }
 .error:empty { display: none; }
 
 /* ---------- plan editor modes & drawing toolbar ---------- */
-.mode-tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mode-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .mode-tabs button { border: 0; border-radius: 0; padding: 8px; background: var(--bg); color: var(--muted); font-weight: 600; }
 .mode-tabs button.active { background: var(--accent-2); color: #fff; }
 .drawbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
@@ -150,10 +144,9 @@ dialog h2 { margin: 0 0 4px; font-size: 18px; }
 .drawbar .opts label { display: inline-flex; align-items: center; gap: 6px; }
 .drawbar .opts select { font-size: 12.5px; padding: 3px 6px; }
 .drawbar .opts input[type=range] { width: 90px; }
-.speed { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; color: var(--muted); } .speed select { padding: 3px 6px; font-size: 13px; } #evTable td button[data-ev-play] { font-size: 12px; white-space: nowrap; }
+.speed { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; color: var(--muted); } .speed select { padding: 3px 6px; font-size: 13px; }
 .grid2 .subhead { grid-column: 1 / -1; font-weight: 700; color: var(--text); font-size: 13px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
 .val { color: var(--accent-2); font-weight: 600; margin-left: 4px; }
-input[type=range].reverse { direction: rtl; }  /* right = faster */
 .mv { font-size: 11.5px; color: var(--muted); } .mv.warn { color: #b45309; }
 
 /* ---------- editor layout: video stays put, only the settings column scrolls ---------- */
@@ -170,14 +163,10 @@ input[type=range].reverse { direction: rtl; }  /* right = faster */
 }
 .col-right::-webkit-scrollbar { width: 8px; }
 .col-right::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
-select.evmode { display: block; margin-top: 3px; font-size: 12px; padding: 2px 4px; }
-.evroute-row { display: flex; gap: 6px; align-items: center; margin-top: 3px; font-size: 12px; white-space: nowrap; }
-button.evroute-clear { font-size: 12px; white-space: nowrap; }
-button.evroute-clear { color: var(--muted); }
-button.evroute-clear:hover { color: #dc2626; border-color: #dc2626; }
-button.evroute.active { background: #2563eb; border-color: #2563eb; color: #fff; }
-.evsec { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.evsec input { width: 58px; padding: 2px 4px; margin-right: 3px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
+select.mvmode { display: block; font-size: 12px; padding: 2px 4px; margin-bottom: 2px; }
+.mvroute-row { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+button.mvroute-clear { font-size: 11px; padding: 0 6px; color: var(--muted); }
+button.mvroute-clear:hover { color: #dc2626; border-color: #dc2626; }
 
 /* ---------- help: shortcut tables ---------- */
 .help h3 { margin: 14px 0 6px; font-size: 14px; }
@@ -187,3 +176,23 @@ button.evroute.active { background: #2563eb; border-color: #2563eb; color: #fff;
 .keys td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 .keys td:first-child { white-space: nowrap; }
 kbd { display: inline-block; padding: 1px 6px; font: 12px/1.4 ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--bg); }
+
+/* ---------- ④ 이동 지점: free start/end points with a time box right next to each point ---------- */
+.plan-wrap { position: relative; }
+#planLabels { position: absolute; inset: 0; pointer-events: none; }
+.ptlabel { position: absolute; transform: translateY(-50%); display: inline-flex; align-items: center; gap: 4px; pointer-events: auto;
+  background: rgba(255, 255, 255, .94); border: 1.5px solid #2563eb; border-radius: 7px; padding: 1px 3px 1px 6px; font-size: 11px; font-weight: 700;
+  color: #2563eb; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); white-space: nowrap; cursor: text; }
+.ptlabel.start { border-style: dashed; }
+.ptlabel.active { border-color: #ea580c; color: #ea580c; box-shadow: 0 0 0 3px rgba(234, 88, 12, .25); z-index: 1; }
+.ptlabel input { width: 62px; padding: 1px 3px; font-size: 12px; font-weight: 500; border: 0; background: transparent; color: #1d1f23;
+  font-variant-numeric: tabular-nums; }
+.ptlabel input:focus { outline: none; }
+.ptlabel input::placeholder { color: #9aa1ab; font-weight: 400; }
+#mvTable input.mvtime { width: 70px; padding: 2px 5px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); font-variant-numeric: tabular-nums; }
+#mvTable input.mvtime.active { border-color: #ea580c; box-shadow: 0 0 0 2px rgba(234, 88, 12, .25); }
+#mvTable tr.active td { background: rgba(234, 88, 12, .08); }
+#mvTable tr.now td { box-shadow: inset 3px 0 0 #2563eb; }
+#mvTable td:first-child a { font-weight: 700; text-decoration: none; }
+#moveSel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one fixed line: the plan must not jump when the selection text changes */
+#moveSel b { color: #ea580c; }

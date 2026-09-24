@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from skimage.morphology import skeletonize
 
-from .track import compute_room_track
+from .track import compute_track
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 FONT_DIR = Path(__file__).resolve().parent.parent / "static" / "fonts"
@@ -55,13 +55,8 @@ DEFAULT_SETTINGS = {
     "marker_color": "#ffffff",
     "marker_size": 1.0,
     "glow": True,
-    "transition": "slide",     # default for each room change: slide (walk) | jump (fade out, fade in at the new room)
-    "fade_sec": 0.6,           # jump: fade-out + fade-in time
+    "fade_sec": 0.6,           # fade-out + fade-in time (floor changes, "스르르" moves, fading over to a move's start point)
     "panel_fade_sec": 0.6,     # the plan itself eases in/out at each floor's show window
-    "move_timing": "speed",    # speed: duration follows the route length | time: every move takes transition_sec
-    "cross_sec": 4.0,          # speed: seconds to walk across the whole plan (long side)
-    "transition_sec": 0.8,
-    "move_anchor": "center",   # the recorded moment is the move's start | center | end
     # output
     "overlay_codec": "qtrle",  # qtrle: QuickTime Animation (lossless, ~100MB / 10 min 2K) | prores: ProRes 4444 (~4.5GB)
     # automatic vector detection when a plan is uploaded (and on "다시 인식"), see vectorize.py
@@ -619,7 +614,7 @@ class Minimap:
         return np.asarray(layer, np.float32) / 255
 
     def _room_names(self, layer: np.ndarray, rooms: list[dict], fit: tuple, L: dict, plan_y: tuple[int, int]) -> None:
-        """Room names centred just above each room point (where the marker rests)."""
+        """Room names centred exactly on the spot the user clicked (a room is only a label; pick a clean spot)."""
         if not rooms:
             return
         H, W = layer.shape
@@ -629,15 +624,12 @@ class Minimap:
         font = _font(self.s, px)
         fallback = _font(self.s, px * 0.8, "gothic")
         ox, oy, sc = fit
-        gap = self.marker_r * 1.35
         for r in rooms:
             if not r.get("name"):
                 continue
             x, y = ox + float(r["x"]) * sc, oy + float(r["y"]) * sc
-            base = y - gap - px * 0.15          # baseline just above the point
-            if base - px * 0.75 < plan_y[0] - px * 0.2:  # no room above the point: put it below
-                base = y + gap + px * 0.75
-            _draw_text(d, x, base, r["name"], font, fallback, "m", 255)
+            _, top, _, bottom = font.getbbox(r["name"], anchor="ls")   # glyph extent relative to the baseline
+            _draw_text(d, x, y - (top + bottom) / 2, r["name"], font, fallback, "m", 255)
         layer[:] = np.maximum(layer, np.asarray(img, np.float32) / 255)
 
     def _make_marker(self, wp: float) -> None:
@@ -751,12 +743,6 @@ def show_windows(floors: list[dict]) -> list[tuple[float | None, float | None]]:
     return [(num(f.get("show_start")), num(f.get("show_end"))) for f in floors]
 
 
-def routing(floor_ids: list[str], plans: list[np.ndarray], settings: dict, edits: list[list[dict]]):
-    """(router, floor_sizes) for compute_room_track: moves are straight lines (bent only at the points
-    the user sets per move), so there is no router; the plan sizes make "cross_sec" mean the same on any plan."""
-    return None, {fid: float(max(p.shape[:2])) for fid, p in zip(floor_ids, plans)}
-
-
 def rooms_by_floor(rooms: list[dict], floor_ids: list[str]) -> list[list[dict]]:
     return [[r for r in rooms if r.get("floor") == fid] for fid in floor_ids]
 
@@ -813,8 +799,8 @@ OVERLAY_CODECS = {
 def render_outputs(
     video_path: Path,
     floors: list[dict],         # [{id, label, path, edits}]
-    rooms: list[dict],
-    events: list[dict],
+    rooms: list[dict],          # room names on the plan
+    moves: list[dict],          # "③ 이동 지점": where and when the marker moves
     settings: dict,
     title: str,
     out_dir: Path,
@@ -848,13 +834,12 @@ def render_outputs(
 
     fps, total, W, H = probe(video_path)
     times = np.arange(total) / fps
-    track = compute_room_track(rooms, events, [f["id"] for f in floors], times, settings,
-                               *routing([f["id"] for f in floors], plans, settings, edits), show_windows(floors))
+    track = compute_track(moves, [f["id"] for f in floors], times, settings, show_windows(floors))
     if track is None:
         from .track import plan_only_track
         track = plan_only_track(times, show_windows(floors), settings)   # windows only, no marker
     if track is None:
-        raise RuntimeError("방 이동 기록이 없습니다. 방을 기록하거나 층별 도면 노출 구간을 정해주세요")
+        raise RuntimeError("이동 지점이 없습니다. ③ 이동 지점을 찍거나 층별 도면 노출 구간을 정해주세요")
     mm = minimap_for_frame(plans, labels, settings, title, W, H, per_floor, edits)
     # frame key: (plan on screen, marker x, y, marker alpha, glow level, plan alpha); no plan -> a blank frame
     keys = []

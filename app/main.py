@@ -20,8 +20,8 @@ from pydantic import BaseModel
 
 from .motion import analyze_video
 from .render import (FFMPEG, DEFAULT_SETTINGS, FIXTURE_TYPES, auto_kinds, auto_trim, build_preview, decode_plan, imwrite,
-                     load_plan, show_windows, merged_settings, render_outputs, rooms_by_floor, routing, structure_alpha)
-from .track import compute_room_track, plan_only_track
+                     load_plan, show_windows, merged_settings, render_outputs, rooms_by_floor, structure_alpha)
+from .track import compute_track, plan_only_track
 from .vectorize import AUTO_KINDS, auto_edits
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -114,6 +114,7 @@ def public_project(pid: str) -> dict:
     proj = load_project(pid)
     d = pdir(pid)
     proj["id"] = pid
+    proj.setdefault("moves", [])
     proj["settings"] = merged_settings(proj.get("settings"))
     proj["default_title"] = f"{proj.get('name', '')} mini map".strip()
     proj["has_preview"] = (d / "preview.mp4").exists()
@@ -195,7 +196,7 @@ def list_projects():
             "duration": p.get("video", {}).get("duration", 0),
             "floors": [fl.get("label", "") for fl in floors],
             "rooms": len(p.get("rooms", [])),
-            "events": len(p.get("events", [])),
+            "moves": len(p.get("moves", [])),
             "outputs": outputs,
             # styled minimap if it has been rendered, else the raw plan
             "thumb": f"outputs/{minimap}" if minimap else (floors[0]["file"] if floors else None),
@@ -237,7 +238,7 @@ def create_project(
             "video": {"file": vpath.name, "original_name": video.filename, **info},
             "floors": floors,
             "rooms": [],
-            "events": [],
+            "moves": [],
             "settings": settings,
         }
         (d / "project.json").write_text(json.dumps(proj, ensure_ascii=False, indent=2), "utf-8")
@@ -257,8 +258,38 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     floors: list[dict] | None = None     # labels, order and drawing edits are editable here
     rooms: list[dict] | None = None
-    events: list[dict] | None = None
+    moves: list[dict] | None = None      # "③ 이동 지점": start/end points with their own times, bends, mode
     settings: dict | None = None
+
+
+def clean_moves(moves: list[dict], floor_ids: set[str]) -> list[dict]:
+    """Moves as stored: {id, a: {floor, x, y}, b: {floor, x, y} | None, t0, t1, via?, mode?}. A move whose end
+    point is not placed yet (b = None) is kept so it survives a reload; the track ignores it until it is complete.
+    "via" = bend points (plan px) the walk passes through in order (④ 경로 꺾기); mode "jump" = fade instead of walking."""
+    def point(p):
+        if p is None:
+            return None
+        if p["floor"] not in floor_ids:
+            raise ValueError("floor")
+        return {"floor": p["floor"], "x": round(float(p["x"]), 1), "y": round(float(p["y"]), 1)}
+
+    def when(v):
+        return None if v in (None, "") else round(max(0.0, float(v)), 3)
+
+    out = []
+    try:
+        for m in moves:
+            a = point(m.get("a"))
+            if a is None:
+                continue
+            via = [[round(float(q[0]), 1), round(float(q[1]), 1)] for q in (m.get("via") or [])[:30]]
+            out.append({"id": str(m.get("id") or uuid.uuid4().hex[:6]), "a": a, "b": point(m.get("b")),
+                        "t0": when(m.get("t0")), "t1": when(m.get("t1")),
+                        **({"via": via} if via else {}), **({"mode": "jump"} if m.get("mode") == "jump" else {})})
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "잘못된 이동 지점입니다")
+    out.sort(key=lambda m: (m["t0"] is None, m["t0"] or 0.0))
+    return out
 
 
 @app.put("/api/projects/{pid}")
@@ -295,23 +326,10 @@ def update_project(pid: str, body: ProjectUpdate):
             except (KeyError, TypeError, ValueError):
                 raise HTTPException(400, f"잘못된 방 정보: {r}")
         proj["rooms"] = rooms
-    room_ids = {r["id"] for r in proj["rooms"]}
-    if body.events is not None:
-        try:
-            # "mode" / "sec" override the default transition / duration for this one room change;
-            # "via" = bend points (plan px) the straight walk passes through, in order
-            def via_of(e):
-                pts = [[round(float(q[0]), 1), round(float(q[1]), 1)] for q in (e.get("via") or [])[:30]]
-                return {"via": pts} if pts else {}
-            evs = [{"t": round(float(e["t"]), 3), "room": str(e["room"]),
-                    **({"mode": e["mode"]} if e.get("mode") in ("walk", "jump") else {}),
-                    **({"sec": round(min(60.0, max(0.0, float(e["sec"]))), 2)} if e.get("sec") not in (None, "") else {}),
-                    **via_of(e)}
-                   for e in body.events]
-        except (KeyError, TypeError, ValueError):
-            raise HTTPException(400, "잘못된 이동 기록입니다")
-        proj["events"] = sorted(evs, key=lambda e: e["t"])
-    proj["events"] = [e for e in proj.get("events", []) if e["room"] in room_ids]
+    if body.moves is not None:
+        proj["moves"] = clean_moves(body.moves, floor_ids)
+    proj["moves"] = [m for m in proj.get("moves", [])
+                     if m["a"]["floor"] in floor_ids and (m.get("b") is None or m["b"]["floor"] in floor_ids)]
     if body.settings is not None:
         proj["settings"] = merged_settings({**proj.get("settings", {}), **body.settings})
     save_project(pid, proj)
@@ -421,7 +439,8 @@ def delete_floor(pid: str, fid: str):
     proj["floors"].remove(fl)
     gone = {r["id"] for r in proj["rooms"] if r["floor"] == fid}
     proj["rooms"] = [r for r in proj["rooms"] if r["id"] not in gone]
-    proj["events"] = [e for e in proj["events"] if e["room"] not in gone]
+    proj["moves"] = [m for m in proj.get("moves", [])
+                     if m["a"]["floor"] != fid and (m.get("b") is None or m["b"]["floor"] != fid)]
     (d / fl["file"]).unlink(missing_ok=True)
     save_project(pid, proj)
     return public_project(pid)
@@ -461,12 +480,9 @@ def get_track(pid: str, fps: float = 30.0):
     s = merged_settings(proj.get("settings"))
     fps = min(max(fps, 1.0), 60.0)
     times = np.arange(0, proj["video"]["duration"] + 1 / fps, 1 / fps)
-    d = pdir(pid)
     fids = [f["id"] for f in proj["floors"]]
-    plans = [load_plan(d / f["file"]) for f in proj["floors"]]
-    edits = [f.get("edits", []) for f in proj["floors"]]
     windows = show_windows(proj["floors"])
-    tr = compute_room_track(proj["rooms"], proj["events"], fids, times, s, *routing(fids, plans, s, edits), windows)
+    tr = compute_track(proj.get("moves"), fids, times, s, windows)
     if tr is None:
         # no records: no marker, but floors with a show window still come and go
         tr = plan_only_track(times, windows, s)
@@ -474,7 +490,7 @@ def get_track(pid: str, fps: float = 30.0):
             return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "pf": [], "pa": [], "moves": []}
         return {"fps": fps, "floor": [], "x": [], "y": [], "a": [], "moves": [],
                 "pf": tr["pfloor"].tolist(), "pa": np.round(tr["panel"], 2).tolist()}
-    moves = [{k: v if isinstance(v, str) else round(float(v), 2) for k, v in m.items()} for m in tr["moves"]]
+    moves = [{k: v if isinstance(v, (str, bool)) else round(float(v), 2) for k, v in m.items()} for m in tr["moves"]]
     return {"fps": fps, "floor": tr["floor"].tolist(), "moves": moves,
             "x": np.round(tr["x"], 1).tolist(), "y": np.round(tr["y"], 1).tolist(),
             "a": np.round(tr["alpha"], 2).tolist(), "pf": tr["pfloor"].tolist(), "pa": np.round(tr["panel"], 2).tolist()}
@@ -505,12 +521,12 @@ def render(pid: str, body: RenderRequest):
     outputs = [o for o in body.outputs if o in ("composite", "overlay", "minimap")]
     if not outputs:
         raise HTTPException(400, "출력 형식을 선택해주세요")
-    if any(o in outputs for o in ("composite", "overlay")) and not proj["events"]:
-        raise HTTPException(400, "방 이동 기록이 없습니다. 영상을 멈추고 출발한 방을 먼저 지정해주세요")
+    if any(o in outputs for o in ("composite", "overlay")) and not proj.get("moves"):
+        raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 출발·도착 지점을 먼저 찍어주세요")
 
     def run(update):
         files = render_outputs(
-            d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj["events"],
+            d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj.get("moves", []),
             proj.get("settings", {}), title_of(proj), d / "outputs", outputs, update,
         )
         return {"files": files}
