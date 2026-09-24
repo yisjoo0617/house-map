@@ -48,6 +48,7 @@
       <tr><td><kbd>D</kbd> / <kbd>S</kbd> / <kbd>B</kbd></td><td>문 / 계단 / 변기</td></tr>
       <tr><td>도형 클릭</td><td>선택 (선 포함) · 새로 그린 도형은 바로 선택됨 · <kbd>Esc</kbd> = 선택 해제</td></tr>
       <tr><td>선택한 도형 드래그</td><td>옮기기 · 끝점·모서리·변 드래그 = 크기 조절 · <kbd>Del</kbd> = 삭제</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>[</kbd> / <kbd>Ctrl</kbd>+<kbd>]</kbd></td><td>선택한 도형을 맨 뒤로 / 맨 앞으로 (겹친 도형은 위에 있는 것이 먼저 잡힘 · 지우개 자국보다 뒤로 가면 지운 자리에서는 가려짐)</td></tr>
       <tr><td><kbd>R</kbd> / <kbd>C</kbd></td><td>사각형 / 원</td></tr>
       <tr><td><kbd>W</kbd> / <kbd>K</kbd> / <kbd>I</kbd> / <kbd>O</kbd></td><td>세면대 / 싱크대 / 인덕션 / 옷장</td></tr>
       <tr><td><kbd>F</kbd></td><td>뒤집기 (문·변기·계단 클릭)</td></tr>
@@ -55,9 +56,8 @@
       <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>지우개 작게 / 크게</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd></td><td>선택한 도형 복사 / 마우스 위치에 붙여넣기</td></tr>
       <tr><td><kbd>A</kbd></td><td>크기 조절 (끝점·모서리·변 드래그)</td></tr>
-      <tr><td><kbd>Ctrl</kbd>+드래그</td><td>선을 포함해 무엇이든 옮기기</td></tr>
       <tr><td><kbd>Shift</kbd>+드래그</td><td>선을 포함해 크기 조절 (끝점·모서리·변)</td></tr>
-      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+드래그</td><td>도형을 복사해서 옮기기</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+드래그</td><td>도형을 복사해서 옮기기 (선 포함)</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>되돌리기</td></tr>
     </table>
     <table>
@@ -212,10 +212,12 @@
           <button data-tool="rect" title="사각형 (R): 모서리에서 모서리로 드래그 (욕조, 세면대, 기둥 등)">▭ 사각형</button>
           <button data-tool="circle" title="원 (C): 중심에서 바깥으로 드래그">○ 원</button>
           <button data-tool="flip" title="뒤집기 (F): 문은 여는 방향, 변기는 벽 반대쪽, 계단은 단 방향이 뒤집힙니다">⇄ 뒤집기</button>
-          <button data-tool="copy" title="복사 도구: 도형을 클릭하면 바로 옆에 복사본이 생기고, 드래그하면 복사본을 그 자리로 옮깁니다. 도형을 선택한 뒤 Ctrl+C, 마우스를 놓을 자리에 두고 Ctrl+V를 눌러도 됩니다. 다른 도구를 든 채 Ctrl+Shift+드래그해도 같습니다">⧉ 복사</button>
+          <button data-tool="copy" title="복사 도구: 도형을 클릭하면 바로 옆에 복사본이 생기고, 드래그하면 복사본을 그 자리로 옮깁니다. 도형을 선택한 뒤 Ctrl+C, 마우스를 놓을 자리에 두고 Ctrl+V를 눌러도 됩니다. 다른 도구를 든 채 Ctrl+드래그해도 같습니다">⧉ 복사</button>
           <button data-tool="resize" title="크기 조절 (A): 도형의 끝점·모서리·변을 드래그해서 크기를 바꿉니다 (선·문은 끝점, 사각형·계단·설비는 모서리와 변, 원은 테두리, 변기는 벽 쪽과 앞쪽). 다른 도구를 든 채 Shift+드래그해도 같습니다">⤢ 크기</button>
           <button data-tool="erase" title="지우개 (E): 문질러 지웁니다. 자동 인식 선과 그 전에 그린 것이 지워지고, 그 뒤에 그린 것은 남습니다. [ ] 키로 크기 조절. 삭제(X) 도구를 들면 지운 자리가 연하게 보이고, 클릭하면 선이 되살아납니다">⌫ 지우개</button>
           <button data-tool="delete" title="삭제 (X): 선·문·계단 등을 클릭해서 삭제. 이 도구를 들면 지우개가 지나간 자리가 연하게 보이고, 클릭하면 지운 선이 되살아납니다">✕ 삭제</button>
+          <button id="sendBackBtn" title="뒤로 보내기 (Ctrl+[): 선택한 도형을 맨 뒤로 보냅니다. 겹친 도형 중 다른 것을 클릭해 잡을 수 있게 되고, 지우개 자국보다 뒤로 가므로 지운 자리에서는 가려집니다">⬇ 뒤로</button>
+          <button id="bringFrontBtn" title="앞으로 가져오기 (Ctrl+]): 선택한 도형을 맨 앞으로 가져옵니다. 겹친 곳에서 이 도형이 먼저 잡히고, 지우개 자국 위에 그려집니다">⬆ 앞으로</button>
           <button id="undoBtn" title="되돌리기 (Ctrl+Z)">↶ 되돌리기</button>
         </div>
         <div class="tools opts">
@@ -332,6 +334,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=41"></script>
+<script src="/static/app.js?v=43"></script>
 </body>
 </html>

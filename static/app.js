@@ -728,7 +728,7 @@ $("#routeUndoBtn").addEventListener("click", undoRoute);
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭 = 선택 → 선택한 도형만 드래그로 옮기고 손잡이로 크기 조절 (Del 삭제 · Ctrl+C 복사 · Ctrl+V 마우스 위치에 붙여넣기) · 뒤집기는 ⇄ 도구 · Ctrl+Shift+드래그 = 복사해서 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭 = 선택 → 선택한 도형만 드래그로 옮기고 손잡이로 크기 조절 (Del 삭제 · Ctrl+C 복사 · Ctrl+V 마우스 위치에 붙여넣기) · 뒤집기는 ⇄ 도구 · Ctrl+드래그 = 복사해서 옮기기"
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
@@ -1498,7 +1498,7 @@ function moveCursor(e, p) {
     if (m) { planCv.style.cursor = m.h ? "nwse-resize" : "grab"; return; }
   }
   planCv.style.cursor = state.tool === "copy" ? (over ? "copy" : "crosshair")
-    : (e.ctrlKey || e.metaKey) && over ? "grab" : "crosshair";
+    : (e.ctrlKey || e.metaKey) && over ? "copy" : "crosshair";
 }
 
 // ---- direct manipulation: a click selects an item; only the selected item can then be dragged (move) or
@@ -1511,6 +1511,23 @@ function selectEdit(e) {
   state.selectedEdit = e || null;
   drawPlan();
 }
+
+// z-order of the selected shape. Edits are drawn, hit-tested and rendered in list order, so the last one is on top:
+// "뒤로" puts it under everything (including eraser strokes, which then wipe it), "앞으로" on top of everything.
+function reorderSelected(toFront) {
+  const e = state.selectedEdit;
+  const list = e && curEdits();
+  if (!list || !list.includes(e)) { state.selectedEdit = null; flash("먼저 도형을 클릭해서 선택하세요"); return; }
+  const i = list.indexOf(e);
+  if (toFront ? i === list.length - 1 : i === 0) { flash(toFront ? "이미 맨 앞에 있습니다" : "이미 맨 뒤에 있습니다"); return; }
+  pushUndo();
+  list.splice(i, 1);
+  if (toFront) list.push(e); else list.unshift(e);
+  saveEdits();
+  flash(toFront ? "맨 앞으로 가져옴 · Ctrl+Z로 되돌리기" : "맨 뒤로 보냄 · Ctrl+Z로 되돌리기");
+}
+$("#sendBackBtn").addEventListener("click", () => reorderSelected(false));
+$("#bringFrontBtn").addEventListener("click", () => reorderSelected(true));
 
 function deleteSelectedEdit() {
   const e = state.selectedEdit;
@@ -1685,9 +1702,9 @@ function drawDown(e) {
     if (m) { startMove(p, m.e, false); return; }
   }
   state.selectedEdit = null;   // set again on a plain click (drawUp) or when a new item is drawn
-  if (e.ctrlKey || e.metaKey) {   // Ctrl+drag moves, Ctrl+Shift+drag drags a copy
+  if (e.ctrlKey || e.metaKey) {   // Ctrl+drag drags a copy of the item under the pointer (moving = select it, then drag)
     const hit = hitEdit(p, SHAPE_TYPES, true);   // never an eraser stroke: those are invisible outside the delete tool
-    if (hit) startMove(p, hit, e.shiftKey);
+    if (hit) startMove(p, hit, true);
     return;
   }
   if (resizeGesture(e)) {   // resize tool, or Shift+drag with any tool
@@ -1760,7 +1777,7 @@ function drawUp() {
     else if (d.copy) {   // a plain click: put the copy just beside the original so it is visible
       translateEdit(d.target, 12 * cssPx(), 12 * cssPx());
       saveEdits(d.target.type === "erase");
-      flash("복사됨 · Ctrl+드래그로 옮기세요");
+      flash("복사됨 · 드래그로 옮기세요");
     } else { state.undo.pop(); }
     state.selectedEdit = d.target;   // a plain click selects the shape (Del deletes it); a drag keeps it selected
     drawPlan();
@@ -1890,7 +1907,7 @@ function hitEdit(p, types, interior = false) {
       const r = Math.hypot(e.end[0] - e.hinge[0], e.end[1] - e.hinge[1]);
       d = Math.min(d, Math.abs(Math.hypot(p.x - e.hinge[0], p.y - e.hinge[1]) - r));
     }
-    if (d < bd) { bd = d; best = e; }
+    if (d <= bd) { bd = d; best = e; }   // equal distance (two boxes you clicked inside): the later one, drawn on top, wins
   }
   return best;
 }
@@ -2458,6 +2475,11 @@ document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyC") { e.preventDefault(); copySelectedEdit(); return; }
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") { e.preventDefault(); pasteEdit(); return; }
     if (TOOL_KEYS[e.code] && !e.ctrlKey && !e.metaKey) { setTool(TOOL_KEYS[e.code]); return; }
+    if ((e.ctrlKey || e.metaKey) && (e.code === "BracketLeft" || e.code === "BracketRight")) {   // Ctrl+[ / Ctrl+] = 뒤로 / 앞으로
+      e.preventDefault();
+      reorderSelected(e.code === "BracketRight");
+      return;
+    }
     if (e.code === "BracketLeft" || e.code === "BracketRight") {   // [ / ] = smaller / bigger eraser
       const inp = $("#eraseSize");
       inp.value = Math.max(+inp.min, Math.min(+inp.max, +inp.value + (e.code === "BracketRight" ? 3 : -3)));
