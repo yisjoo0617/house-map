@@ -5,6 +5,7 @@ import base64
 import math
 import shutil
 import subprocess
+import time
 import uuid
 from fractions import Fraction
 from pathlib import Path
@@ -103,6 +104,8 @@ def decode_plan(img: np.ndarray | None) -> np.ndarray:
         raise RuntimeError("도면 이미지를 열 수 없습니다")
     if img.dtype == np.uint16:   # 16-bit PNG (scanners, Photoshop): everything downstream expects 8-bit
         img = (img >> 8).astype(np.uint8)
+    elif np.issubdtype(img.dtype, np.floating):   # EXR / HDR / PFM decode to 0..1
+        img = np.clip(img * (255.0 if float(img.max()) <= 1.0 else 1.0), 0, 255).astype(np.uint8)
     elif img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
     if img.ndim == 2:
@@ -890,8 +893,11 @@ def render_outputs(
 def _render_overlay(mm, keys, fps, total, W, H, codec_args, out_dir, out_path, log_path, progress) -> None:
     """The marker rests most of the time, so render each distinct frame once as a PNG
     and let FFmpeg hold it for as long as it lasts (concat demuxer with durations)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("_frames_*"):   # left behind by a render that was killed; a live one keeps writing (recent mtime)
+        if old.is_dir() and time.time() - old.stat().st_mtime > 3600:
+            shutil.rmtree(old, ignore_errors=True)
     work = out_dir / f"_frames_{uuid.uuid4().hex[:8]}"   # its own folder: two renders must not wipe each other's frames
-    shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     try:
         runs: list[tuple[tuple, int, int]] = []  # (key, start, end)
@@ -963,7 +969,10 @@ def _render_composite(mm, keys, video_path, fps, total, W, H, out_path, log_path
                 progress(min(0.99, i / total), f"합성 {i}/{total} 프레임")
     finally:
         cap.release()
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except OSError:   # ffmpeg already gone: the error raised above (or the exit code below) says so
+            pass
         code = proc.wait()
     if code != 0:
         raise RuntimeError("composite.mp4 인코딩 실패 (ffmpeg.log 확인)")

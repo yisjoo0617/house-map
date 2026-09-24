@@ -35,7 +35,7 @@ NOT_STYLE = {"title", "hfov"}
 app = FastAPI(title="House-Map")
 executor = ThreadPoolExecutor(max_workers=2)
 jobs: dict[str, dict] = {}
-_lock = threading.Lock()
+_lock = threading.RLock()   # re-entrant: an endpoint checks the jobs and starts one under the same lock
 _proj_lock = threading.Lock()   # every load -> change -> save of a project.json runs under it: the client sends
                                 # rooms/path, floors and settings as separate requests that must not interleave
 
@@ -486,18 +486,16 @@ def redetect_floor(pid: str, fid: str, body: AutoBody):
 
 @app.post("/api/projects/{pid}/floors")
 def add_floor(pid: str, plan: UploadFile = File(...), label: str = Form("")):
-    with _proj_lock:
-        return _add_floor(pid, plan, label)
-
-
-def _add_floor(pid: str, plan: UploadFile, label: str):
     d = pdir(pid)
-    proj = load_project(pid)
-    n = 1 + max((int(f["id"][1:]) for f in proj["floors"]), default=0)
-    fl = save_plan_upload(d, plan, f"f{n}", merged_settings(proj.get("settings")))
-    fl["label"] = label or f"{len(proj['floors']) + 1}F"
-    proj["floors"].append(fl)
-    save_project(pid, proj)
+    with _proj_lock:
+        proj = load_project(pid)
+        n = 1 + max((int(f["id"][1:]) for f in proj["floors"]), default=0)
+    fl = save_plan_upload(d, plan, f"f{n}", merged_settings(proj.get("settings")))   # slow (detection): outside the lock
+    with _proj_lock:
+        proj = load_project(pid)
+        fl["label"] = label or f"{len(proj['floors']) + 1}F"
+        proj["floors"].append(fl)
+        save_project(pid, proj)
     return public_project(pid)
 
 
@@ -539,10 +537,10 @@ def delete_project(pid: str):
     d = pdir(pid)
     with _lock:   # ffmpeg still holds files of a running job (Windows cannot delete those: a half-removed folder would remain)
         busy = [j["kind"] for j in jobs.values() if j["project"] == pid and j["status"] in ("queued", "running")]
-    if busy:
-        names = {"preview": "미리보기 변환", "analyze": "분석", "render": "렌더링"}
-        raise HTTPException(409, f"{names.get(busy[0], busy[0])}이 진행 중입니다. 끝난 뒤 삭제해 주세요")
-    shutil.rmtree(d)
+        if busy:
+            names = {"preview": "미리보기 변환", "analyze": "분석", "render": "렌더링"}
+            raise HTTPException(409, f"{names.get(busy[0], busy[0])}이 진행 중입니다. 끝난 뒤 삭제해 주세요")
+        shutil.rmtree(d)   # still under the lock, so no job can be started for it meanwhile
     return {"ok": True}
 
 
@@ -617,11 +615,6 @@ def render(pid: str, body: RenderRequest):
         raise HTTPException(400, "출력 형식을 선택해주세요")
     if any(o in outputs for o in ("composite", "overlay")) and not proj.get("path"):
         raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 마커가 지나갈 지점을 먼저 찍어주세요")
-    with _lock:   # a render of this project is already running (the page was reloaded meanwhile): follow that one
-        running = next((j for j in jobs.values() if j["project"] == pid and j["kind"] == "render" and j["status"] in ("queued", "running")), None)
-    if running:
-        return {"job": running["id"]}
-
     def run(update):
         files = render_outputs(
             d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj.get("path", []),
@@ -629,7 +622,9 @@ def render(pid: str, body: RenderRequest):
         )
         return {"files": files}
 
-    return {"job": start_job(pid, "render", run)}
+    with _lock:   # a render of this project is already running (the page was reloaded meanwhile): follow that one
+        running = next((j for j in jobs.values() if j["project"] == pid and j["kind"] == "render" and j["status"] in ("queued", "running")), None)
+        return {"job": running["id"] if running else start_job(pid, "render", run)}
 
 
 # ---------- style presets (same look across every property / floor) ----------

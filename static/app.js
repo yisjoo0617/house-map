@@ -447,6 +447,8 @@ $("#floorTabs").addEventListener("click", async (e) => {
     await flushSaves();
     applyProject(await api(`/api/projects/${state.proj.id}/floors/${f.id}`, { method: "DELETE" }));
     state.undo = state.undo.filter((u) => u.fid !== f.id);   // Ctrl+Z must never write this floor's drawing onto a later floor with the same id
+    state.routeUndo = [];   // the server dropped this floor's points and the bends of the legs that followed them
+    $("#routeUndoBtn").disabled = true;
     delete state.structImgs[f.id];
     if (state.selectedEdit) state.selectedEdit = null;
     state.viewFloor = state.proj.floors[0].id;
@@ -1354,10 +1356,14 @@ function setTool(tool) {
   if (state.mode === "draw") drawPlan();   // the delete tool reveals eraser strokes, the eraser its cursor
 }
 
+const structSeq = {};   // per floor: only the newest structure request may land (an older render must not overwrite a newer one)
 async function loadStruct() {
   if (!state.proj) return;
-  const fid = state.viewFloor;
-  state.structImgs[fid] = await loadImage(`/api/projects/${state.proj.id}/structure/${fid}.png?v=${Date.now()}`);
+  const fid = state.viewFloor, pid = state.proj.id;
+  const seq = (structSeq[fid] = (structSeq[fid] || 0) + 1);
+  const img = await loadImage(`/api/projects/${pid}/structure/${fid}.png?v=${Date.now()}`);
+  if (seq !== structSeq[fid] || state.proj?.id !== pid) return;
+  state.structImgs[fid] = img;
   drawPlan();
 }
 
@@ -1404,7 +1410,9 @@ function undoEdit() {
   floorOf(last.fid).edits = JSON.parse(last.edits);
   if (last.fid !== state.viewFloor) {   // the change being undone is on another floor: show it, or it looks like nothing happened
     state.selectedEdit = null;
-    showFloor(last.fid);
+    state.viewFloor = last.fid;   // not showFloor(): its structure reload would race the one saveEdits does after saving
+    renderFloorTabs();
+    resizePlan();
     flash(`${floorOf(last.fid).label} 되돌리기`);
   }
   saveEdits(true);
@@ -1523,6 +1531,7 @@ function reorderSelected(toFront) {
   pushUndo();
   list.splice(i, 1);
   if (toFront) list.push(e); else list.unshift(e);
+  delete e.auto;   // 다시 인식 would otherwise put it back at the bottom
   saveEdits();
   flash(toFront ? "맨 앞으로 가져옴 · Ctrl+Z로 되돌리기" : "맨 뒤로 보냄 · Ctrl+Z로 되돌리기");
 }
