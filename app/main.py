@@ -50,7 +50,7 @@ def pdir(pid: str) -> Path:
 
 
 def load_project(pid: str) -> dict:
-    return json.loads((pdir(pid) / "project.json").read_text("utf-8"))
+    return upgrade_project(json.loads((pdir(pid) / "project.json").read_text("utf-8")))
 
 
 def save_project(pid: str, proj: dict) -> None:
@@ -114,8 +114,7 @@ def public_project(pid: str) -> dict:
     proj = load_project(pid)
     d = pdir(pid)
     proj["id"] = pid
-    proj.setdefault("moves", [])
-    proj.setdefault("start", None)
+    proj.setdefault("path", [])
     proj["settings"] = merged_settings(proj.get("settings"))
     proj["default_title"] = f"{proj.get('name', '')} mini map".strip()
     proj["has_preview"] = (d / "preview.mp4").exists()
@@ -197,7 +196,7 @@ def list_projects():
             "duration": p.get("video", {}).get("duration", 0),
             "floors": [fl.get("label", "") for fl in floors],
             "rooms": len(p.get("rooms", [])),
-            "moves": len(p.get("moves", [])),
+            "moves": max(0, len(upgrade_project(p).get("path", [])) - 1),
             "outputs": outputs,
             # styled minimap if it has been rendered, else the raw plan
             "thumb": f"outputs/{minimap}" if minimap else (floors[0]["file"] if floors else None),
@@ -239,7 +238,7 @@ def create_project(
             "video": {"file": vpath.name, "original_name": video.filename, **info},
             "floors": floors,
             "rooms": [],
-            "moves": [],
+            "path": [],
             "settings": settings,
         }
         (d / "project.json").write_text(json.dumps(proj, ensure_ascii=False, indent=2), "utf-8")
@@ -259,39 +258,71 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     floors: list[dict] | None = None     # labels, order and drawing edits are editable here
     rooms: list[dict] | None = None
-    moves: list[dict] | None = None      # "③ 이동 지점": start/end points with their own times, bends, mode
-    start: dict | None = None            # "초기 위치" {floor, x, y}; {} clears it
+    path: list[dict] | None = None       # "③ 이동 지점": ordered points with arrival / departure times, bends, mode
     settings: dict | None = None
 
 
-def clean_moves(moves: list[dict], floor_ids: set[str]) -> list[dict]:
-    """Moves as stored: {id, a: {floor, x, y}, b: {floor, x, y} | None, t0, t1, via?, mode?}. A move whose end
-    point is not placed yet (b = None) is kept so it survives a reload; the track ignores it until it is complete.
-    "via" = bend points (plan px) the walk passes through in order (④ 경로 꺾기); mode "jump" = fade instead of walking."""
-    def point(p):
-        if p is None:
-            return None
-        if p["floor"] not in floor_ids:
-            raise ValueError("floor")
-        return {"floor": p["floor"], "x": round(float(p["x"]), 1), "y": round(float(p["y"]), 1)}
-
+def clean_path(path: list[dict], floor_ids: set[str]) -> list[dict]:
+    """The path as stored: ordered points {id, floor, x, y, arrive, depart, via?, mode?}. "via" = bend points
+    (plan px) of the leg into the point (④ 경로 꺾기); mode "jump" = that leg fades instead of walking."""
     def when(v):
         return None if v in (None, "") else round(max(0.0, float(v)), 3)
 
     out = []
     try:
-        for m in moves:
-            a = point(m.get("a"))
-            if a is None:
+        for q in path:
+            if q.get("floor") not in floor_ids:
                 continue
-            via = [[round(float(q[0]), 1), round(float(q[1]), 1)] for q in (m.get("via") or [])[:30]]
-            out.append({"id": str(m.get("id") or uuid.uuid4().hex[:6]), "a": a, "b": point(m.get("b")),
-                        "t0": when(m.get("t0")), "t1": when(m.get("t1")),
-                        **({"via": via} if via else {}), **({"mode": "jump"} if m.get("mode") == "jump" else {})})
+            via = [[round(float(v[0]), 1), round(float(v[1]), 1)] for v in (q.get("via") or [])[:30]]
+            out.append({"id": str(q.get("id") or uuid.uuid4().hex[:6]), "floor": q["floor"],
+                        "x": round(float(q["x"]), 1), "y": round(float(q["y"]), 1),
+                        "arrive": when(q.get("arrive")), "depart": when(q.get("depart")),
+                        **({"via": via} if via else {}), **({"mode": "jump"} if q.get("mode") == "jump" else {})})
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "잘못된 이동 지점입니다")
-    out.sort(key=lambda m: (m["t0"] is None, m["t0"] or 0.0))
     return out
+
+
+def path_from_moves(moves: list[dict], start: dict | None, fade: float) -> list[dict]:
+    """One-time upgrade of the earlier model (independent start->end moves plus an optional initial position)
+    into a single path. Moves that did not start where the previous one ended get a fade-over leg."""
+    def same(p, q):
+        return p["floor"] == q["floor"] and abs(float(p["x"]) - float(q["x"])) < 0.5 and abs(float(p["y"]) - float(q["y"])) < 0.5
+
+    def point(p, **kw):
+        return {"id": uuid.uuid4().hex[:6], "floor": p["floor"], "x": float(p["x"]), "y": float(p["y"]), "arrive": None, "depart": None, **kw}
+
+    pts: list[dict] = []
+    if start and start.get("floor"):
+        pts.append(point(start))
+    done = [m for m in moves or [] if m.get("a") and m.get("b") and m.get("t0") is not None and m.get("t1") is not None]
+    for m in sorted(done, key=lambda m: float(m["t0"])):
+        t0, t1 = float(m["t0"]), float(m["t1"])
+        if pts and same(pts[-1], m["a"]):
+            pts[-1]["depart"] = t0
+        else:
+            if pts:   # the marker was elsewhere: it faded over just before t0
+                if pts[-1]["depart"] is None:
+                    pts[-1]["depart"] = max(pts[-1]["arrive"] or 0.0, t0 - fade)
+                pts.append(point(m["a"], arrive=t0, depart=t0, mode="jump"))
+            else:
+                pts.append(point(m["a"], depart=t0))
+        extra = {"via": m["via"]} if m.get("via") else {}
+        if m.get("mode") == "jump":
+            extra["mode"] = "jump"
+        pts.append(point(m["b"], arrive=t1, **extra))
+    return pts
+
+
+def upgrade_project(proj: dict) -> dict:
+    """Older project files keep working: the moves/start model becomes a path the first time it is loaded."""
+    if "path" not in proj:
+        fade = float(merged_settings(proj.get("settings")).get("fade_sec", 0.6))
+        proj["path"] = path_from_moves(proj.get("moves", []), proj.get("start"), fade)
+        proj.pop("moves", None)
+        proj.pop("start", None)
+        proj.pop("events", None)
+    return proj
 
 
 @app.put("/api/projects/{pid}")
@@ -328,18 +359,9 @@ def update_project(pid: str, body: ProjectUpdate):
             except (KeyError, TypeError, ValueError):
                 raise HTTPException(400, f"잘못된 방 정보: {r}")
         proj["rooms"] = rooms
-    if body.moves is not None:
-        proj["moves"] = clean_moves(body.moves, floor_ids)
-    if body.start is not None:
-        try:
-            proj["start"] = ({"floor": body.start["floor"], "x": round(float(body.start["x"]), 1), "y": round(float(body.start["y"]), 1)}
-                             if body.start.get("floor") in floor_ids else None)
-        except (KeyError, TypeError, ValueError):
-            raise HTTPException(400, "잘못된 초기 위치입니다")
-    if proj.get("start") and proj["start"]["floor"] not in floor_ids:
-        proj["start"] = None
-    proj["moves"] = [m for m in proj.get("moves", [])
-                     if m["a"]["floor"] in floor_ids and (m.get("b") is None or m["b"]["floor"] in floor_ids)]
+    if body.path is not None:
+        proj["path"] = clean_path(body.path, floor_ids)
+    proj["path"] = [q for q in proj.get("path", []) if q["floor"] in floor_ids]
     if body.settings is not None:
         proj["settings"] = merged_settings({**proj.get("settings", {}), **body.settings})
     save_project(pid, proj)
@@ -449,10 +471,7 @@ def delete_floor(pid: str, fid: str):
     proj["floors"].remove(fl)
     gone = {r["id"] for r in proj["rooms"] if r["floor"] == fid}
     proj["rooms"] = [r for r in proj["rooms"] if r["id"] not in gone]
-    proj["moves"] = [m for m in proj.get("moves", [])
-                     if m["a"]["floor"] != fid and (m.get("b") is None or m["b"]["floor"] != fid)]
-    if proj.get("start") and proj["start"]["floor"] == fid:
-        proj["start"] = None
+    proj["path"] = [q for q in proj.get("path", []) if q["floor"] != fid]
     (d / fl["file"]).unlink(missing_ok=True)
     save_project(pid, proj)
     return public_project(pid)
@@ -494,7 +513,7 @@ def get_track(pid: str, fps: float = 30.0):
     times = np.arange(0, proj["video"]["duration"] + 1 / fps, 1 / fps)
     fids = [f["id"] for f in proj["floors"]]
     windows = show_windows(proj["floors"])
-    tr = compute_track(proj.get("moves"), fids, times, s, windows, proj.get("start"))
+    tr = compute_track(proj.get("path"), fids, times, s, windows)
     if tr is None:
         # no records: no marker, but floors with a show window still come and go
         tr = plan_only_track(times, windows, s)
@@ -533,13 +552,13 @@ def render(pid: str, body: RenderRequest):
     outputs = [o for o in body.outputs if o in ("composite", "overlay", "minimap")]
     if not outputs:
         raise HTTPException(400, "출력 형식을 선택해주세요")
-    if any(o in outputs for o in ("composite", "overlay")) and not proj.get("moves") and not proj.get("start"):
-        raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 출발·도착 지점이나 초기 위치를 먼저 찍어주세요")
+    if any(o in outputs for o in ("composite", "overlay")) and not proj.get("path"):
+        raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 마커가 지나갈 지점을 먼저 찍어주세요")
 
     def run(update):
         files = render_outputs(
-            d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj.get("moves", []),
-            proj.get("settings", {}), title_of(proj), d / "outputs", outputs, update, start=proj.get("start"),
+            d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj.get("path", []),
+            proj.get("settings", {}), title_of(proj), d / "outputs", outputs, update,
         )
         return {"files": files}
 

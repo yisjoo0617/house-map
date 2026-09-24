@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.motion import analyze_video  # noqa: E402
 from app.render import Minimap, auto_trim, load_plan, merged_settings, render_outputs  # noqa: E402
-from app.track import compute_track, plan_moves  # noqa: E402
+from app.track import compute_track, plan_legs  # noqa: E402
 
 SAMPLE = ROOT / "tests" / "sample"
 ROOMS = [
@@ -34,34 +34,48 @@ def sample():
     return SAMPLE
 
 
-def MV(a, b, t0, t1, **extra):
-    """A move between two of ROOMS' positions (room ids) or explicit points."""
-    pt = lambda r: {"floor": r["floor"], "x": r["x"], "y": r["y"]} if isinstance(r, dict) else next(
-        {"floor": q["floor"], "x": q["x"], "y": q["y"]} for q in ROOMS if q["id"] == r)
-    return {"id": f"{a if isinstance(a, str) else 'p'}-{b if isinstance(b, str) else 'p'}-{t0}", "a": pt(a), "b": pt(b), "t0": t0, "t1": t1, **extra}
+def PT(where, arrive=None, depart=None, **extra):
+    """A path point at one of ROOMS' positions (room id) or an explicit {floor, x, y}."""
+    q = where if isinstance(where, dict) else next(r for r in ROOMS if r["id"] == where)
+    return {"id": f"{where if isinstance(where, str) else 'p'}{arrive}", "floor": q["floor"], "x": q["x"], "y": q["y"],
+            "arrive": arrive, "depart": depart, **extra}
 
 
 def test_track_rests_then_walks_between_the_two_times():
-    tr = compute_track([MV("a", "b", 4.0, 6.0)], ["f1", "f2"], np.array([0, 3.9, 4.0, 5.0, 6.0, 9]))
-    assert tr["x"].tolist()[:3] == [100, 100, 100]     # waits at the start point (also before the first move)
+    path = [PT("a", depart=4.0), PT("b", arrive=6.0)]
+    tr = compute_track(path, ["f1", "f2"], np.array([0, 3.9, 4.0, 5.0, 6.0, 9]))
+    assert tr["x"].tolist()[:3] == [100, 100, 100]     # rests at the first point until it departs
     assert tr["x"][3] == pytest.approx(200)            # half-way at the middle of the window: speed follows the times
-    assert tr["x"][4] == 300 and tr["x"][5] == 300     # arrived at t1 and stays
-    assert tr["moves"][0]["kind"] == "walk" and tr["moves"][0]["id"] == "a-b-4.0"
+    assert tr["x"][4] == 300 and tr["x"][5] == 300     # arrived and stays
+    assert tr["moves"][0]["kind"] == "walk" and tr["moves"][0]["id"] == "b6.0" and tr["moves"][0]["k"] == 1
 
 
 def test_track_floor_change_fades():
-    tr = compute_track([MV("a", "c", 2.0, 3.0)], ["f1", "f2"], np.array([1.0, 2.2, 2.8, 3.5]), {})
+    tr = compute_track([PT("a", depart=2.0), PT("c", arrive=3.0)], ["f1", "f2"], np.array([1.0, 2.2, 2.8, 3.5]), {})
     assert tr["floor"].tolist() == [0, 0, 1, 1] and tr["moves"][0]["kind"] == "fade"   # floors change by fading, no glide
     assert tr["alpha"][1] < 1 and tr["alpha"][3] == 1
     assert tr["x"][0] == 100 and tr["x"][3] == 50
 
 
-def test_track_empty_incomplete_and_unknown_floors():
+def test_track_empty_single_point_and_missing_times():
     assert compute_track([], ["f1"], np.array([0.0])) is None
-    half = [{"id": "m1", "a": {"floor": "f1", "x": 1, "y": 1}, "b": None, "t0": 1.0, "t1": None}]
-    assert compute_track(half, ["f1"], np.array([0.0])) is None                     # end point not placed yet
-    assert compute_track([MV("a", "c", 1.0, 2.0)], ["f1"], np.array([0.0])) is None  # a point on a floor that is gone
-    assert compute_track([MV("a", "b", 5.0, 5.0)], ["f1"], np.array([0.0])) is None  # arrival not after departure
+    tr = compute_track([PT("a")], ["f1"], np.array([0.0, 9.0]))                      # one point: the marker just sits there
+    assert tr["x"].tolist() == [100, 100] and tr["moves"] == []
+    assert compute_track([PT("c", depart=1.0)], ["f1"], np.array([0.0])) is None      # only point on a floor that is gone
+    # no departure time = leave on arrival; no arrival time = an instant jump when leaving
+    legs = plan_legs([PT("a"), PT("b", arrive=5.0), PT("a", arrive=None)], ["f1"])
+    assert (legs[0]["start"], legs[0]["end"]) == (0.0, 5.0) and (legs[1]["start"], legs[1]["end"]) == (5.0, 5.0)
+    # arriving "before" leaving is clamped to an instant jump; legs never overlap
+    legs = plan_legs([PT("a", depart=6.0), PT("b", arrive=4.0), PT("a", arrive=5.0)], ["f1"])
+    assert (legs[0]["start"], legs[0]["end"]) == (6.0, 6.0) and (legs[1]["start"], legs[1]["end"]) == (6.0, 6.0)
+
+
+def test_rest_between_arrival_and_departure():
+    path = [PT("a", depart=1.0), PT("b", arrive=2.0, depart=5.0), PT("a", arrive=6.0)]
+    tr = compute_track(path, ["f1"], np.array([0.5, 1.5, 3.0, 4.9, 5.5, 7.0]))
+    assert tr["x"][0] == 100 and 100 < tr["x"][1] < 300 and tr["x"][2] == 300 and tr["x"][3] == 300
+    assert 100 < tr["x"][4] < 300 and tr["x"][5] == 100
+    assert [(m["start"], m["end"]) for m in tr["moves"]] == [(1.0, 2.0), (5.0, 6.0)]
 
 
 def test_motion_analysis_suggests_stops(sample):
@@ -88,8 +102,8 @@ def test_chalk_minimap_turns_dark_lines_white(sample):
 def test_render_all_outputs(sample, tmp_path):
     floors = [{"id": "f1", "label": "1F", "path": sample / "plan_1f.png"},
               {"id": "f2", "label": "2F", "path": sample / "plan_2f.png"}]
-    moves = [MV("a", "b", 2, 4), MV("b", "c", 6, 8)]
-    files = render_outputs(sample / "walk.mp4", floors, ROOMS, moves, {}, "Signature house mini map",
+    path = [PT("a", depart=2), PT("b", arrive=4, depart=6), PT("c", arrive=8)]
+    files = render_outputs(sample / "walk.mp4", floors, ROOMS, path, {}, "Signature house mini map",
                            tmp_path, ["composite", "overlay", "minimap"])
     assert set(files) == {"composite.mp4", "overlay.mov", "minimap_1F.png", "minimap_2F.png", "plan_1F.png", "plan_2F.png"}
     for f in files:
@@ -180,41 +194,32 @@ def test_fixture_shapes_and_thin_lines():
     assert 0 < thin.sum() < 0.6 * thick.sum()
 
 
-def test_walk_bends_at_the_moves_via_points():
+def test_walk_bends_at_the_legs_via_points():
     p0, p1 = {"floor": "f1", "x": 0, "y": 0}, {"floor": "f1", "x": 400, "y": 0}
-    planned = plan_moves([MV(p0, p1, 0.0, 10.0, via=[[0, 300], [400, 300]])], ["f1"])
-    assert planned[0]["poly"].tolist() == [[0, 0], [0, 300], [400, 300], [400, 0]]   # straight legs through the bends
-    tr = compute_track([MV(p0, p1, 0.0, 10.0, via=[[0, 300], [400, 300]])], ["f1"], np.array([5.0]))
-    assert tr["y"][0] == 300                                                          # half-way along the bent route
+    path = [PT(p0, depart=0.0), PT(p1, arrive=10.0, via=[[0, 300], [400, 300]])]
+    legs = plan_legs(path, ["f1"])
+    assert legs[0]["poly"].tolist() == [[0, 0], [0, 300], [400, 300], [400, 0]]   # straight legs through the bends
+    tr = compute_track(path, ["f1"], np.array([5.0]))
+    assert tr["y"][0] == 300                                                       # half-way along the bent route
 
 
 def test_jump_mode_fades_instead_of_walking():
     t = np.array([4.0, 4.5, 4.75, 5.25, 5.5, 6.0, 9.5])
-    tr = compute_track([MV("a", "b", 4.5, 5.5, mode="jump"), MV("b", "a", 9.0, 10.0)], ["f1", "f2"], t)
+    path = [PT("a", depart=4.5), PT("b", arrive=5.5, depart=9.0, mode="jump"), PT("a", arrive=10.0)]
+    tr = compute_track(path, ["f1", "f2"], t)
     a = tr["alpha"]
     assert a[0] == 1 and a[1] == pytest.approx(1, abs=1e-6)          # before the fade
-    assert a[2] < 0.6 and tr["x"][2] == 100                            # fading out at the start point
-    assert a[3] < 0.6 and tr["x"][3] == 300                            # fading in at the end point (no sliding)
+    assert a[2] < 0.6 and tr["x"][2] == 100                            # fading out at the previous point
+    assert a[3] < 0.6 and tr["x"][3] == 300                            # fading in here (no sliding)
     assert a[4] == 1 and a[5] == 1
-    assert 100 < tr["x"][6] < 300 and a[6] == 1                        # the next move walks (default)
+    assert 100 < tr["x"][6] < 300 and a[6] == 1                        # the next leg walks (default)
     assert [m["kind"] for m in tr["moves"]] == ["fade", "walk"]
 
 
-def test_move_from_elsewhere_fades_over_first():
-    # 거실 -> 주방 at 4~6, then a move that starts at 안방's spot on the same floor? no: at a third point on f1
-    p = {"floor": "f1", "x": 300, "y": 300}
-    planned = plan_moves([MV("a", "b", 4.0, 6.0), MV(p, "a", 10.0, 12.0)], ["f1", "f2"], {"fade_sec": 0.5})
-    kinds = [(m["kind"], m.get("hop", False), round(m["start"], 2), round(m["end"], 2)) for m in planned]
-    assert kinds == [("walk", False, 4.0, 6.0),
-                     ("fade", True, 9.5, 10.0),         # 주방 -> the new start point, just before the move
-                     ("walk", False, 10.0, 12.0)]
-    assert planned[2]["from"] == p and planned[1]["from"]["x"] == 300 and planned[1]["from"]["y"] == 100
-
-
 def test_show_windows_choose_the_plan_and_ease_in_and_out():
-    moves = [MV("a", "c", 10.0, 11.0)]                                # marker: f1 until ~10s, then f2
+    path = [PT("a", depart=10.0), PT("c", arrive=11.0)]                 # marker: f1 until ~10s, then f2
     t = np.array([0.0, 1.0, 1.3, 2.0, 5.0, 7.7, 8.0, 8.3, 9.0, 12.0, 14.7, 15.0, 16.0])
-    tr = compute_track(moves, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(1.0, 8.0), (8.0, 15.0)])
+    tr = compute_track(path, ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(1.0, 8.0), (8.0, 15.0)])
     pf, pa = tr["pfloor"], tr["panel"]
     assert pf[0] == -1 and pa[0] == 0                                  # nothing on screen before any window
     assert pf[1] == 0 and pa[1] == 0 and 0.4 < pa[2] < 0.6 and pa[3] == 1   # 1F eases in from 1.0
@@ -227,9 +232,22 @@ def test_show_windows_choose_the_plan_and_ease_in_and_out():
 
 def test_floor_without_window_follows_the_marker():
     t = np.array([0.0, 5.0, 9.0, 12.0, 20.0, 30.0])
-    tr = compute_track([MV("a", "c", 10.0, 11.0)], ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
+    tr = compute_track([PT("a", depart=10.0), PT("c", arrive=11.0)], ["f1", "f2"], t, {"panel_fade_sec": 0.6}, windows=[(None, None), (10.0, 25.0)])
     assert tr["pfloor"].tolist() == [0, 0, 0, 1, 1, -1]                # auto 1F, then 2F's window, then nothing
     assert tr["panel"][0] == 1                                         # no fade-in at the very start of the video
+
+
+def test_old_move_files_upgrade_to_a_path():
+    from app.main import path_from_moves
+    start = {"floor": "f1", "x": 100, "y": 100}
+    moves = [{"id": "m1", "a": {"floor": "f1", "x": 300, "y": 100}, "b": {"floor": "f1", "x": 300, "y": 300}, "t0": 4.0, "t1": 6.0, "via": [[350, 200]]},
+             {"id": "m2", "a": {"floor": "f1", "x": 300, "y": 300}, "b": {"floor": "f2", "x": 50, "y": 50}, "t0": 8.0, "t1": 9.0}]
+    pts = path_from_moves(moves, start, 0.5)
+    got = [(p["floor"], p["x"], p["arrive"], p["depart"], p.get("mode"), p.get("via")) for p in pts]
+    assert got == [("f1", 100, None, 3.5, None, None),           # the old initial position leaves 0.5s before the first move
+                   ("f1", 300, 4.0, 4.0, "jump", None),          # ...fading over to where that move started
+                   ("f1", 300, 6.0, 8.0, None, [[350, 200]]),    # end of move 1 = start of move 2: one shared point, bend kept
+                   ("f2", 50, 9.0, None, None, None)]
 
 
 # ---------- automatic vectorisation (app/vectorize.py) ----------
@@ -341,18 +359,3 @@ def test_upload_runs_auto_detection_and_redetect_api(sample):
     edits = r.json()["floors"][0]["edits"]
     assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[-1] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
     client.delete(f"/api/projects/{pid}")
-
-
-def test_initial_position_marker():
-    start = {"floor": "f1", "x": 100, "y": 100}
-    # only an initial position, no moves: the marker just sits there
-    tr = compute_track([], ["f1", "f2"], np.array([0.0, 5.0]), {}, start=start)
-    assert tr["x"].tolist() == [100, 100] and tr["floor"].tolist() == [0, 0] and tr["moves"] == []
-    # with a move that starts elsewhere: rests at the initial position, fades over just before t0, then walks
-    mv = [MV({"floor": "f1", "x": 300, "y": 100}, "b", 4.0, 6.0)]
-    planned = plan_moves(mv, ["f1", "f2"], {"fade_sec": 0.5}, start)
-    assert [(m["kind"], m.get("hop", False), m["start"], m["end"]) for m in planned] == [("fade", True, 3.5, 4.0), ("walk", False, 4.0, 6.0)]
-    tr = compute_track(mv, ["f1", "f2"], np.array([1.0]), {}, start=start)
-    assert tr["x"][0] == 100
-    # an initial position on a floor that no longer exists is ignored
-    assert compute_track([], ["f2"], np.array([0.0]), {}, start=start) is None

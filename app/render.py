@@ -800,13 +800,12 @@ def render_outputs(
     video_path: Path,
     floors: list[dict],         # [{id, label, path, edits}]
     rooms: list[dict],          # room names on the plan
-    moves: list[dict],          # "③ 이동 지점": where and when the marker moves
+    path: list[dict],           # "③ 이동 지점": the points the marker passes, with arrival / departure times
     settings: dict,
     title: str,
     out_dir: Path,
     outputs: list[str],
     progress: Callable[[float, str], None] | None = None,
-    start: dict | None = None,  # "초기 위치": where the marker is before the first move
 ) -> list[str]:
     settings = merged_settings(settings)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -835,7 +834,7 @@ def render_outputs(
 
     fps, total, W, H = probe(video_path)
     times = np.arange(total) / fps
-    track = compute_track(moves, [f["id"] for f in floors], times, settings, show_windows(floors), start)
+    track = compute_track(path, [f["id"] for f in floors], times, settings, show_windows(floors))
     if track is None:
         from .track import plan_only_track
         track = plan_only_track(times, show_windows(floors), settings)   # windows only, no marker

@@ -180,13 +180,14 @@ kbd { display: inline-block; padding: 1px 6px; font: 12px/1.4 ui-monospace, mono
 /* ---------- ④ 이동 지점: free start/end points with a time box right next to each point ---------- */
 .plan-wrap { position: relative; }
 #planLabels { position: absolute; inset: 0; pointer-events: none; }
-.ptlabel { position: absolute; transform: translateY(-50%); display: inline-flex; align-items: center; gap: 4px; pointer-events: auto;
-  background: rgba(255, 255, 255, .94); border: 1.5px solid #2563eb; border-radius: 7px; padding: 1px 3px 1px 6px; font-size: 11px; font-weight: 700;
-  color: #2563eb; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); white-space: nowrap; cursor: text; }
-.ptlabel.start { border-style: dashed; }
-.ptlabel.active { border-color: #ea580c; color: #ea580c; box-shadow: 0 0 0 3px rgba(234, 88, 12, .25); z-index: 1; }
-.ptlabel input { width: 62px; padding: 1px 3px; font-size: 12px; font-weight: 500; border: 0; background: transparent; color: #1d1f23;
+.ptlabel { position: absolute; transform: translateY(-50%); display: inline-flex; align-items: center; gap: 6px; pointer-events: auto;
+  background: rgba(255, 255, 255, .96); border: 1.5px solid #ea580c; border-radius: 8px; padding: 3px 6px; font-size: 11px; font-weight: 700;
+  color: #ea580c; box-shadow: 0 0 0 3px rgba(234, 88, 12, .2), 0 1px 3px rgba(0, 0, 0, .18); white-space: nowrap; z-index: 1; }
+.ptlabel .ptname { color: #1d1f23; font-size: 11px; margin-right: 2px; }
+.ptlabel label { display: inline-flex; align-items: center; gap: 3px; cursor: text; color: #6b7280; }
+.ptlabel input { width: 62px; padding: 1px 4px; font-size: 12px; font-weight: 500; border: 1px solid #e2e5ea; border-radius: 5px; background: #fff; color: #1d1f23;
   font-variant-numeric: tabular-nums; }
+.ptlabel input.active { border-color: #ea580c; box-shadow: 0 0 0 2px rgba(234, 88, 12, .25); }
 .ptlabel input:focus { outline: none; }
 .ptlabel input::placeholder { color: #9aa1ab; font-weight: 400; }
 #mvTable input.mvtime { width: 70px; padding: 2px 5px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); font-variant-numeric: tabular-nums; }
@@ -196,5 +197,4 @@ kbd { display: inline-block; padding: 1px 6px; font: 12px/1.4 ui-monospace, mono
 #mvTable td:first-child a { font-weight: 700; text-decoration: none; }
 #moveSel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one fixed line: the plan must not jump when the selection text changes */
 #moveSel b { color: #ea580c; }
-#startPlaceBtn.active { background: #16a34a; border-color: #16a34a; color: #fff; }
-#startInfo { color: #16a34a; font-weight: 600; }
+.mv .warn { color: #b45309; }

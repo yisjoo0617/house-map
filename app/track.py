@@ -1,11 +1,16 @@
-"""Marker track from the moves set in "③ 이동 지점".
+"""Marker track from the path set in "③ 이동 지점".
 
-A move is a start point and an end point placed anywhere on a floor plan, each with its own time:
-{id, a: {floor, x, y}, b: {floor, x, y}, t0, t1, via?: [[x, y], ...], mode?: "walk" | "jump"}.
-The marker leaves a at t0 and arrives at b exactly at t1, so its speed follows from the two times.
-On one floor it walks in straight legs through the bend points ("via", set in ④ 경로 꺾기); across
-floors, or with mode="jump", it fades out at a and back in at b. Between moves it rests where the last
-move ended, and when the next move starts somewhere else it fades over to that start point just before t0.
+The path is an ordered list of points on the floor plans. Consecutive points share nothing but their
+order: the marker rests at point k from its arrival time until its departure time, then travels to
+point k+1, arriving there at that point's arrival time. So the end of one leg and the start of the next
+are always the same spot, and every departure / arrival time is the user's own.
+    {id, floor, x, y, arrive, depart, via?: [[x, y], ...], mode?: "walk" | "jump"}
+The first point is where the marker is from the video start ("arrive" unused). "via" and "mode" belong
+to the leg INTO the point: on one floor the marker walks in straight legs through the bend points
+(④ 경로 꺾기); across floors, or with mode="jump", it fades out at the previous point and back in here.
+
+Missing times are filled in the least surprising way: no departure = leave the moment you arrived
+(the first point: at 0), no arrival = arrive the moment you left (an instant jump). Legs never overlap.
 
 Coordinates are plan-image pixels of the point's floor.
 """
@@ -31,100 +36,72 @@ def _along(poly: np.ndarray, frac: np.ndarray) -> np.ndarray:
     return np.stack([np.interp(d, cum, poly[:, 0]), np.interp(d, cum, poly[:, 1])], axis=1)
 
 
-def _pos(p: dict) -> dict:
-    return {"floor": p["floor"], "x": float(p["x"]), "y": float(p["y"])}
+def _num(v) -> float | None:
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
-def _same(p: dict, q: dict) -> bool:
-    return p["floor"] == q["floor"] and abs(p["x"] - q["x"]) < 0.5 and abs(p["y"] - q["y"]) < 0.5
-
-
-def clean_moves(moves: list[dict] | None, floor_ids: list[str]) -> list[dict]:
-    """Complete moves (both points on known floors, t1 after t0), in start-time order."""
+def clean_path(path: list[dict] | None, floor_ids: list[str]) -> list[dict]:
+    """The path's points on known floors, in order, with numbers as floats (a dropped point joins its neighbours)."""
     out = []
-    for m in moves or []:
-        a, b = m.get("a"), m.get("b")
-        if not a or not b or m.get("t0") in (None, "") or m.get("t1") in (None, ""):
-            continue
-        if a.get("floor") not in floor_ids or b.get("floor") not in floor_ids:
+    for q in path or []:
+        if not isinstance(q, dict) or q.get("floor") not in floor_ids:
             continue
         try:
-            t0, t1 = float(m["t0"]), float(m["t1"])
-            pa, pb = _pos(a), _pos(b)
-            via = [(float(q[0]), float(q[1])) for q in (m.get("via") or []) if len(q) == 2]
+            x, y = float(q["x"]), float(q["y"])
         except (KeyError, TypeError, ValueError):
             continue
-        if t1 <= t0:
-            continue
-        out.append({"id": m.get("id"), "a": pa, "b": pb, "t0": t0, "t1": t1, "via": via,
-                    "mode": "jump" if m.get("mode") == "jump" else "walk"})
-    out.sort(key=lambda m: m["t0"])
+        via = [(float(v[0]), float(v[1])) for v in (q.get("via") or []) if len(v) == 2]
+        out.append({"id": q.get("id"), "floor": q["floor"], "x": x, "y": y, "arrive": _num(q.get("arrive")),
+                    "depart": _num(q.get("depart")), "via": via, "mode": "jump" if q.get("mode") == "jump" else "walk"})
     return out
 
 
-def clean_start(start: dict | None, floor_ids: list[str]) -> dict | None:
-    """The optional initial position ("초기 위치"), if it is on a known floor."""
-    if not start or start.get("floor") not in floor_ids:
-        return None
-    try:
-        return _pos(start)
-    except (KeyError, TypeError, ValueError):
-        return None
+def initial_pose(path: list[dict] | None, floor_ids: list[str]) -> dict | None:
+    """Where the marker is before anything happens: the first point of the path."""
+    pts = clean_path(path, floor_ids)
+    return {"floor": pts[0]["floor"], "x": pts[0]["x"], "y": pts[0]["y"]} if pts else None
 
 
-def initial_pose(moves: list[dict] | None, floor_ids: list[str], start: dict | None = None) -> dict | None:
-    """Where the marker is before anything happens: the initial position if one is set, else the first move's start point."""
-    first = clean_start(start, floor_ids)
-    if first:
-        return first
-    clean = clean_moves(moves, floor_ids)
-    return clean[0]["a"] if clean else None
-
-
-def plan_moves(moves: list[dict] | None, floor_ids: list[str], settings: dict | None = None,
-               start: dict | None = None) -> list[dict]:
-    """Each move as {id, t, start, end, from, to, poly, kind}; a fade-over to a start point the marker is not
-    at yet (including from the initial position) is an extra {kind: fade, hop: True} entry just before it."""
-    settings = settings or {}
-    fade = float(settings.get("fade_sec", 0.6))
+def plan_legs(path: list[dict] | None, floor_ids: list[str], settings: dict | None = None) -> list[dict]:
+    """Each leg into point k (k >= 1) as {id (of point k), k, t, start, end, from, to, poly, kind}."""
+    pts = clean_path(path, floor_ids)
     out = []
     prev_end = -np.inf
-    cur = clean_start(start, floor_ids)   # where the marker is after the moves planned so far
-    for m in clean_moves(moves, floor_ids):
-        a, b = m["a"], m["b"]
-        if cur is None:
-            cur = a
-        if not _same(cur, a):
-            # the marker is somewhere else: fade over to the start point just before it leaves
-            start, end = max(prev_end, m["t0"] - fade), m["t0"]
-            if end > start:
-                out.append({"id": m["id"], "t": m["t0"], "start": start, "end": end, "from": cur, "to": a,
-                            "poly": np.asarray([(cur["x"], cur["y"]), (a["x"], a["y"])], float), "kind": "fade", "hop": True})
-        # the user set both times, so they win: leave exactly at t0 and arrive exactly at t1
-        walk = a["floor"] == b["floor"] and m["mode"] == "walk"
-        poly = [(a["x"], a["y"]), *(m["via"] if walk else []), (b["x"], b["y"])]
-        out.append({"id": m["id"], "t": m["t0"], "start": m["t0"], "end": m["t1"], "from": a, "to": b,
+    for k in range(1, len(pts)):
+        a, b = pts[k - 1], pts[k]
+        start = a["depart"]
+        if start is None:
+            start = a["arrive"] if (k > 1 and a["arrive"] is not None) else (0.0 if k == 1 else prev_end)
+        start = max(float(start), prev_end)          # legs never overlap
+        end = b["arrive"] if b["arrive"] is not None else start
+        end = max(float(end), start)                 # arriving before leaving = an instant jump
+        walk = a["floor"] == b["floor"] and b["mode"] == "walk"
+        poly = [(a["x"], a["y"]), *(b["via"] if walk else []), (b["x"], b["y"])]
+        out.append({"id": b["id"] or "", "k": k, "t": start, "start": start, "end": end,
+                    "from": {"floor": a["floor"], "x": a["x"], "y": a["y"]}, "to": {"floor": b["floor"], "x": b["x"], "y": b["y"]},
                     "poly": np.asarray(poly, float), "kind": "walk" if walk else "fade"})
-        prev_end = m["t1"]
-        cur = b
+        prev_end = end
     return out
 
 
 def compute_track(
-    moves: list[dict] | None,
+    path: list[dict] | None,
     floor_ids: list[str],
     times: np.ndarray,
     settings: dict | None = None,
     windows: list[tuple[float | None, float | None]] | None = None,   # per floor: (show start, show end)
-    start: dict | None = None,                                         # "초기 위치": where the marker is before the first move
 ) -> dict | None:
-    """Per-time floor index, x, y, marker opacity and panel opacity (or None if there is neither a complete move
-    nor an initial position)."""
+    """Per-time floor index, x, y, marker opacity and panel opacity (or None if the path is empty)."""
     settings = settings or {}
-    first = initial_pose(moves, floor_ids, start)
+    first = initial_pose(path, floor_ids)
     if first is None:
         return None
-    planned = plan_moves(moves, floor_ids, settings, start)
+    legs = plan_legs(path, floor_ids, settings)
     times = np.asarray(times, dtype=float)
     fidx = {f: i for i, f in enumerate(floor_ids)}
 
@@ -133,7 +110,7 @@ def compute_track(
     floor = np.full(len(times), fidx[first["floor"]], dtype=int)
     alpha = np.ones(len(times))
 
-    for m in planned:
+    for m in legs:
         a, b = m["from"], m["to"]
         after = times >= m["end"]
         x[after], y[after] = float(b["x"]), float(b["y"])
@@ -154,16 +131,15 @@ def compute_track(
             src, dst = idx[first_half], idx[~first_half]
             x[src], y[src], floor[src] = float(a["x"]), float(a["y"]), fidx[a["floor"]]
             x[dst], y[dst], floor[dst] = float(b["x"]), float(b["y"]), fidx[b["floor"]]
-            k = np.abs(u - 0.5) * 2  # 1 -> 0 -> 1
-            alpha[sel] = k * k * (3 - 2 * k)
-    info = [{"id": m["id"] or "", "t": m["t"], "start": m["start"], "end": m["end"], "kind": m["kind"],
-             **({"hop": True} if m.get("hop") else {})} for m in planned]
+            kk = np.abs(u - 0.5) * 2  # 1 -> 0 -> 1
+            alpha[sel] = kk * kk * (3 - 2 * kk)
+    info = [{"id": m["id"], "k": m["k"], "t": m["t"], "start": m["start"], "end": m["end"], "kind": m["kind"]} for m in legs]
     pfloor, panel = panel_plan(times, floor, windows or [], float(settings.get("panel_fade_sec", 0.6)))
     return {"t": times, "floor": floor, "x": x, "y": y, "alpha": alpha, "pfloor": pfloor, "panel": panel, "moves": info}
 
 
 def plan_only_track(times: np.ndarray, windows: list[tuple[float | None, float | None]], settings: dict | None = None) -> dict | None:
-    """With no moves there is no marker, but floors with a show window can still be on screen.
+    """With no path there is no marker, but floors with a show window can still be on screen.
     Returns a track like compute_track's with the marker hidden everywhere, or None if no window is set."""
     settings = settings or {}
     if not any(w != (None, None) for w in windows):

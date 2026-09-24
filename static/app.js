@@ -8,10 +8,8 @@ const ROOM_COLORS = ["#e11d48", "#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#08
 const state = {
   proj: null,
   rooms: [],
-  moves: [],          // "③ 이동 지점": [{id, a: {floor,x,y}, b: {floor,x,y}|null, t0, t1}]
-  activePt: null,     // the selected start/end point: {id, end: "a"|"b"} (⏺ 현재 writes into it)
-  start: null,        // "초기 위치" {floor, x, y}: where the marker is before the first move (null = first move's start point)
-  placingStart: false,
+  path: [],           // "③ 이동 지점": ordered points [{id, floor, x, y, arrive, depart, via?, mode?}]
+  active: null,       // the selected point and time field: {id, field: "arrive"|"depart"} (⏺ 현재 writes into it)
   track: null,
   analysis: null,
   planImgs: {},       // floor id -> Image (original plan, for editing)
@@ -255,7 +253,7 @@ async function openProject(id) {
   state.viewFloor = null;
   state.undo = [];
   state.structImgs = {};
-  state.activePt = null;
+  state.active = null;
   applyProject(proj);
   state.analysis = proj.has_analysis ? await api(`/api/projects/${id}/analysis`) : null;
   $("#listView").classList.add("hidden");
@@ -275,8 +273,7 @@ async function openProject(id) {
 function applyProject(proj) {
   state.proj = proj;
   state.rooms = proj.rooms.map((r) => ({ ...r }));
-  state.moves = (proj.moves || []).map((m) => ({ ...m, a: { ...m.a }, b: m.b ? { ...m.b } : null }));
-  state.start = proj.start ? { ...proj.start } : null;
+  state.path = (proj.path || []).map((q) => ({ ...q }));
   if (!state.viewFloor || !floorOf(state.viewFloor)) state.viewFloor = proj.floors[0].id;
   $("#titleInput").placeholder = proj.default_title;
   renderFloorTabs();
@@ -523,7 +520,6 @@ $("#presetDelete").addEventListener("click", async () => {
 
 let saveTimer;
 function saveRoomsMoves() {
-  state.moves.sort((a, b) => (a.t0 ?? Infinity) - (b.t0 ?? Infinity));
   renderRooms();
   renderMoves();
   drawPlan();
@@ -534,7 +530,7 @@ function saveRoomsMoves() {
 
 async function doSave() {
   saveTimer = null;
-  await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, moves: state.moves, start: state.start || {} }) });
+  await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, path: state.path }) });
   await Promise.all([refreshTrack(), refreshMinimap()]);
 }
 
@@ -591,23 +587,25 @@ function deleteRoom(room) {
 }
 
 // ---------------- route bending (straight legs through points you set) ----------------
-// A walk goes a -> via[0] -> via[1] -> ... -> b in straight lines. "via" lives on the move (③ 이동 지점).
+// A leg goes point k-1 -> via[0] -> via[1] -> ... -> point k in straight lines. "via" lives on point k.
 
-const canBend = (mv) => moveComplete(mv) && mv.a.floor === mv.b.floor && mv.mode !== "jump";
-const routePoly = (mv) => [[mv.a.x, mv.a.y], ...(mv.via || []), [mv.b.x, mv.b.y]];
+// the legs of the path: {k, a: point k-1, b: point k}
+const legs = () => state.path.slice(1).map((b, i) => ({ k: i + 1, a: state.path[i], b }));
+const canBend = (leg) => leg.a.floor === leg.b.floor && leg.b.mode !== "jump";
+const routePoly = (leg) => [[leg.a.x, leg.a.y], ...(leg.b.via || []), [leg.b.x, leg.b.y]];
 
 // the walks that can be bent on the floor being viewed
 function bendableMoves() {
-  return state.moves.filter((m) => canBend(m) && m.a.floor === state.viewFloor);
+  return legs().filter((l) => canBend(l) && l.a.floor === state.viewFloor);
 }
 
-// ---- undo for route bending: snapshots of every move's bend points, keyed by the move id so unrelated
-// changes in between (a new move, a retimed one) are left alone ----
+// ---- undo for route bending: snapshots of every point's bend points, keyed by the point id so unrelated
+// changes in between (a new point, a retimed one) are left alone ----
 
 state.routeUndo = [];
 
 function pushRouteUndo() {
-  state.routeUndo.push(state.moves.map((m) => [m.id, m.via ? JSON.stringify(m.via) : null]));
+  state.routeUndo.push(state.path.map((q) => [q.id, q.via ? JSON.stringify(q.via) : null]));
   if (state.routeUndo.length > 100) state.routeUndo.shift();
   $("#routeUndoBtn").disabled = false;
 }
@@ -617,19 +615,19 @@ function undoRoute() {
   $("#routeUndoBtn").disabled = !state.routeUndo.length;
   if (!last) return;
   const snap = new Map(last);
-  for (const m of state.moves) {
-    if (!snap.has(m.id)) continue;
-    const via = snap.get(m.id);
-    if (via) m.via = JSON.parse(via); else delete m.via;
+  for (const q of state.path) {
+    if (!snap.has(q.id)) continue;
+    const via = snap.get(q.id);
+    if (via) q.via = JSON.parse(via); else delete q.via;
   }
   saveRoomsMoves();
   flash("경로 되돌리기");
 }
 
-function clearRoute(mv) {   // straight away, no confirmation: Ctrl+Z (or ↶ in ④ 경로 꺾기) brings the bends back
-  if (!mv.via?.length) return;
+function clearRoute(pt) {   // straight away, no confirmation: Ctrl+Z (or ↶ in ④ 경로 꺾기) brings the bends back
+  if (!pt.via?.length) return;
   pushRouteUndo();
-  delete mv.via;
+  delete pt.via;
   saveRoomsMoves();
   flash("경로 초기화 · Ctrl+Z로 되돌리기");
 }
@@ -641,7 +639,7 @@ function updatePlanHint() {
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
-        ? "○ 출발 · ● 도착 · ⌂ 초기 위치 · 빈 곳 클릭 = 지점 추가 · 지점 클릭 = 선택(⏺ 현재로 시각 기록, 시간 칸 표시) · 지점 Shift+클릭 = 거기서 새 이동 출발 · 드래그 = 옮기기 · 더블클릭 = 그 시각으로 · 우클릭/Del = 삭제 · 마커가 있던 자리와 출발 지점이 다르면 출발 직전에 스르르 옮겨갑니다"
+        ? "⌂ 시작 지점 · ● 지나는 지점 · 빈 곳 클릭 = 경로 끝에 지점 추가 (방 점을 클릭하면 그 위치) · 선 근처 클릭 = 그 사이에 지점 끼워 넣기 · 지점 클릭 = 선택(도착·출발 시간 칸 표시, ⏺ 현재로 기록) · 드래그 = 옮기기 (앞뒤 이동이 함께 따라옵니다) · 더블클릭 = 그 시각으로 · 우클릭/Del = 지점 삭제"
         : "빈 곳 클릭 = 그 자리에 방 이름 표시 (선이 없는 깨끗한 곳을 고르세요) · 드래그 = 위치 수정 · 우클릭 = 삭제 · 마커 이동은 ③ 이동 지점에서";
 }
 
@@ -650,7 +648,7 @@ function hitVia(p) {
   const tol = 12 * cssPx();
   let best = null, bd = tol;
   for (const ev of bendableMoves()) {
-    (ev.via || []).forEach((q, k) => {
+    (ev.b.via || []).forEach((q, k) => {
       const d = Math.hypot(q[0] - p.x, q[1] - p.y);
       if (d < bd) { bd = d; best = { ev, k }; }
     });
@@ -674,8 +672,8 @@ function insertVia(p) {
       if (d < bd) { bd = d; best = { ev, k }; }
     }
   }
-  if (!best) { flash("이 층에는 꺾을 수 있는 이동이 없습니다 (③에서 같은 층 안의 이동을 먼저 만드세요)"); return false; }
-  (best.ev.via ||= []).splice(best.k, 0, [+p.x.toFixed(1), +p.y.toFixed(1)]);
+  if (!best) { flash("이 층에는 꺾을 수 있는 이동이 없습니다 (③에서 같은 층 안의 지점을 두 개 이상 찍으세요)"); return false; }
+  (best.ev.b.via ||= []).splice(best.k, 0, [+p.x.toFixed(1), +p.y.toFixed(1)]);
   return true;
 }
 
@@ -709,24 +707,15 @@ planCv.addEventListener("pointerdown", (e) => {
   if (state.mode === "draw") return drawDown(e);
   const p = planPoint(e);
   if (state.mode === "moves") {
-    if (state.placingStart) { placeStart(p); return; }
-    if (hitStart(p)) {   // the initial-position marker: drag to move it
+    const pt = hitPathPoint(p);
+    if (pt) {   // a click selects the point (its time boxes appear); a drag moves it, both legs follow
       planCv.setPointerCapture(e.pointerId);
-      state.drag = { startMk: true, start: p, moved: false };
-      setActivePt(null, null);
+      state.drag = { pt, start: p, moved: false };
+      setActive(pt, null);
       return;
     }
-    const h = hitMovePoint(p);
-    const pending = state.moves.find((m) => !m.b);
-    // a click on a point selects it (and drags it) - except that while a move waits for its end point the
-    // click places the end there, and Shift+click starts a new move from that point (chained moves join up)
-    if (h && (h.mv === pending || (!pending && !e.shiftKey))) {
-      planCv.setPointerCapture(e.pointerId);
-      state.drag = { mv: h.mv, end: h.end, start: p, moved: false };
-      setActivePt(h.mv, h.end);
-      return;
-    }
-    placeMovePoint(p);
+    const leg = hitLeg(p);
+    if (leg) insertPoint(p, leg.k); else appendPoint(p);
     return;
   }
   if (state.mode === "route") {
@@ -737,7 +726,7 @@ planCv.addEventListener("pointerdown", (e) => {
       state.drag = { via: h.k, ev: h.ev, start: p, moved: false };
       return;
     }
-    if (hitMovePoint(p)) return;   // a start / end point is never a bend
+    if (hitPathPoint(p)) return;   // a path point is never a bend
     pushRouteUndo();
     if (insertVia(p)) saveRoomsMoves(); else state.routeUndo.pop();
     return;
@@ -795,16 +784,15 @@ planCv.addEventListener("pointermove", (e) => {
   if (!d) {
     if (state.mode === "moves" && viewImg()) {
       const q = planPoint(e);
-      planCv.style.cursor = state.placingStart ? "copy" : hitMovePoint(q) || hitStart(q) ? "grab" : "crosshair";
+      planCv.style.cursor = hitPathPoint(q) ? "grab" : hitLeg(q) ? "copy" : "crosshair";
     }
     return;
   }
   const p = planPoint(e);
   if (!d.moved && Math.hypot(p.x - d.start.x, p.y - d.start.y) < 4 * cssPx()) return;
   d.moved = true;
-  if (d.via != null) d.ev.via[d.via] = [+p.x.toFixed(1), +p.y.toFixed(1)];
-  else if (d.mv) { const q = d.mv[d.end]; q.x = +p.x.toFixed(1); q.y = +p.y.toFixed(1); }
-  else if (d.startMk) { state.start.x = +p.x.toFixed(1); state.start.y = +p.y.toFixed(1); }
+  if (d.via != null) d.ev.b.via[d.via] = [+p.x.toFixed(1), +p.y.toFixed(1)];
+  else if (d.pt) { d.pt.x = +p.x.toFixed(1); d.pt.y = +p.y.toFixed(1); }
   else { d.room.x = p.x; d.room.y = p.y; }
   drawPlan();
 });
@@ -818,11 +806,11 @@ planCv.addEventListener("pointerup", (e) => {
   if (d.moved) saveRoomsMoves();   // a plain click on a room / point only selects it
 });
 
-// double-click a start/end point: jump the video to its time
+// double-click a path point: jump the video to its arrival (the first point: its departure)
 planCv.addEventListener("dblclick", (e) => {
   if (state.mode !== "moves" || !viewImg()) return;
-  const h = hitMovePoint(planPoint(e));
-  const t = h && ptTime(h.mv, h.end);
+  const pt = hitPathPoint(planPoint(e));
+  const t = pt && (ptIndex(pt) === 0 ? pt.depart : pt.arrive);
   if (t != null) { video.pause(); video.currentTime = t; }
 });
 
@@ -832,15 +820,13 @@ planCv.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   if (state.mode === "draw") return;
   if (state.mode === "moves") {
-    const q = planPoint(e);
-    if (hitStart(q)) { clearStart(); return; }
-    const h = hitMovePoint(q);
-    if (h) deleteMove(h.mv);
+    const pt = hitPathPoint(planPoint(e));
+    if (pt) deletePoint(pt);
     return;
   }
   if (state.mode === "route") {
     const h = hitVia(planPoint(e));
-    if (h) { pushRouteUndo(); h.ev.via.splice(h.k, 1); if (!h.ev.via.length) delete h.ev.via; saveRoomsMoves(); }
+    if (h) { pushRouteUndo(); h.ev.b.via.splice(h.k, 1); if (!h.ev.b.via.length) delete h.ev.b.via; saveRoomsMoves(); }
     return;
   }
   const hit = hitRoom(planPoint(e));
@@ -856,241 +842,239 @@ function suggestRoomName() {
 // one CSS pixel, in plan units
 const cssPx = () => viewImg().width / planCv.getBoundingClientRect().width;
 
-// ---------------- free moves ("③ 이동 지점") ----------------
-// A free move is a start point and an end point placed anywhere on a plan, each with its own time: the
-// marker leaves a at t0 and arrives at b at t1; the server turns the moves into the per-frame track.
+// ---------------- the path ("③ 이동 지점") ----------------
+// state.path is the ordered list of points the marker passes: it rests at a point from its arrival until its
+// departure, then travels to the next point, arriving at that point's arrival time. The end of one leg is
+// always the start of the next (one shared point), and every time is the user's own. The first point is
+// where the marker sits from the video start. "via" (bends) and "mode" (걸어서 / 스르르) belong to the leg INTO a point.
 
-const moveById = (id) => state.moves.find((m) => m.id === id);
-const ptTime = (mv, end) => (end === "a" ? mv.t0 : mv.t1);
-function setPtTime(mv, end, t) { if (end === "a") mv.t0 = t; else mv.t1 = t; }
-const isActivePt = (mv, end) => !!state.activePt && state.activePt.id === mv.id && state.activePt.end === end;
-const moveComplete = (mv) => !!mv.b && mv.t0 != null && mv.t1 != null;
+const ptById = (id) => state.path.find((q) => q.id === id);
+const ptIndex = (pt) => state.path.indexOf(pt);
 const nowT = () => +video.currentTime.toFixed(2);
+const FIELD_LABEL = { arrive: "도착", depart: "출발" };
 
-// the selected point, if its move still exists
+// which time boxes a point has: the first point only departs, every other point arrives and departs
+const ptFields = (pt) => (ptIndex(pt) === 0 ? ["depart"] : ["arrive", "depart"]);
+
+// the selected point and field, if the point still exists
 function activePoint() {
-  const a = state.activePt, mv = a && moveById(a.id);
-  return mv && (a.end === "a" || mv.b) ? { mv, end: a.end } : null;
+  const a = state.active, pt = a && ptById(a.id);
+  if (!pt) return null;
+  const fields = ptFields(pt);
+  return { pt, field: fields.includes(a.field) ? a.field : fields[0] };
 }
+const isActiveField = (pt, field) => { const ap = activePoint(); return !!ap && ap.pt === pt && ap.field === field; };
+const isActivePoint = (pt) => state.active?.id === pt.id;
 
-// selecting only re-marks what is on screen (no table rebuild), so a time box keeps its focus
-function setActivePt(mv, end) {
-  state.activePt = mv ? { id: mv.id, end } : null;
+// selecting only re-marks what is on screen (no table rebuild), so a time box keeps its focus.
+// field = null keeps the current field when the same point is re-selected, else the first empty one.
+function setActive(pt, field) {
+  if (!pt) state.active = null;
+  else {
+    const keep = state.active?.id === pt.id ? state.active.field : null;
+    state.active = { id: pt.id, field: field || keep || firstEmptyField(pt) };
+  }
   refreshActiveMarks();
   drawPlan();
   drawTimeline();
 }
 
-// ---- "초기 위치": one optional marker per project; the marker rests there until the first move ----
-
-function hitStart(p) {
-  const s = state.start;
-  return !!s && s.floor === state.viewFloor && Math.hypot(s.x - p.x, s.y - p.y) < 13 * cssPx();
-}
-
-function placeStart(p) {
-  const pos = snapMovePoint(p);
-  state.start = pos;
-  state.placingStart = false;
-  planCv.style.cursor = "crosshair";
-  saveRoomsMoves();
-  flash("초기 위치 지정 · 첫 이동 전까지 마커가 여기 있습니다");
-}
-
-function clearStart() {
-  if (!state.start) return;
-  state.start = null;
-  saveRoomsMoves();
-  flash("초기 위치 삭제 (첫 이동의 출발 지점에서 시작)");
-}
-
-function startInfoText() {
-  const s = state.start;
-  if (!s) return "초기 위치 없음 (첫 이동의 출발 지점에서 시작)";
-  return `초기 위치: ${escapeHtml(floorOf(s.floor)?.label || "")}${s.floor !== state.viewFloor ? " (다른 층)" : ""}`;
-}
-
-$("#startPlaceBtn").addEventListener("click", () => {
-  state.placingStart = !state.placingStart;
-  $("#startPlaceBtn").classList.toggle("active", state.placingStart);
-  planCv.style.cursor = state.placingStart ? "copy" : "crosshair";
-  if (state.placingStart) flash("도면에서 초기 위치를 클릭하세요 (방 점을 클릭하면 그 위치)");
-});
-$("#startClearBtn").addEventListener("click", clearStart);
+const firstEmptyField = (pt) => ptFields(pt).find((f) => pt[f] == null) || ptFields(pt)[0];
 
 function refreshActiveMarks() {
   const ap = activePoint();
-  $("#startInfo").innerHTML = startInfoText();
-  $("#startClearBtn").classList.toggle("hidden", !state.start);
-  $("#startPlaceBtn").classList.toggle("active", state.placingStart);
-  for (const tr of $$("#mvTable tbody tr[data-mv]")) tr.classList.toggle("active", tr.dataset.mv === state.activePt?.id);
-  for (const inp of $$("[data-mv-time]")) {
-    const [id, end] = inp.dataset.mvTime.split(":");
-    inp.classList.toggle("active", !!ap && ap.mv.id === id && ap.end === end);
+  for (const tr of $$("#mvTable tbody tr[data-pt]")) tr.classList.toggle("active", tr.dataset.pt === state.active?.id);
+  for (const inp of $$("[data-pt-time]")) {
+    const [id, field] = inp.dataset.ptTime.split(":");
+    inp.classList.toggle("active", !!ap && ap.pt.id === id && ap.field === field);
   }
   $("#moveSel").innerHTML = ap
-    ? `선택: <b>이동 ${state.moves.indexOf(ap.mv) + 1} · ${ap.end === "a" ? "출발" : "도착"}</b> ${ptTime(ap.mv, ap.end) != null ? fmtTime(ptTime(ap.mv, ap.end)) : "(시각 없음)"} · ⏺ 현재를 누르면 지금 재생 시각이 들어갑니다`
+    ? `선택: <b>${ptName(ap.pt)} · ${FIELD_LABEL[ap.field]}</b> ${ap.pt[ap.field] != null ? fmtTime(ap.pt[ap.field]) : "(비어 있음)"} · ⏺ 현재를 누르면 지금 재생 시각이 들어갑니다`
     : "지점을 클릭해서 선택하세요";
 }
 
-// nearest start / end point on the floor being viewed: {mv, end} or null
-function hitMovePoint(p) {
+const ptName = (pt) => (ptIndex(pt) === 0 ? "⌂ 시작 지점" : `지점 ${ptIndex(pt)}`);
+
+// nearest path point on the floor being viewed
+function hitPathPoint(p) {
   const tol = 12 * cssPx();
   let best = null, bd = tol;
-  for (const mv of state.moves) for (const end of ["a", "b"]) {
-    const q = mv[end];
-    if (!q || q.floor !== state.viewFloor) continue;
+  for (const q of state.path) {
+    if (q.floor !== state.viewFloor) continue;
     const d = Math.hypot(q.x - p.x, q.y - p.y);
-    if (d < bd) { bd = d; best = { mv, end }; }
+    if (d < bd) { bd = d; best = q; }
   }
   return best;
 }
 
-// a click near a room or another point uses that exact spot, so chained moves join up
-function snapMovePoint(p) {
-  const room = hitRoom(p);
-  if (room) return { floor: room.floor, x: room.x, y: room.y };
-  const h = hitMovePoint(p);
-  if (h) return { ...h.mv[h.end] };
-  return { floor: state.viewFloor, x: +p.x.toFixed(1), y: +p.y.toFixed(1) };
+// the leg (on this floor, straight or bent) under the pointer: {k} or null
+function hitLeg(p) {
+  const tol = 9 * cssPx();
+  let best = null, bd = tol;
+  for (const l of legs()) {
+    if (l.a.floor !== state.viewFloor || l.b.floor !== state.viewFloor) continue;
+    const poly = canBend(l) ? routePoly(l) : [[l.a.x, l.a.y], [l.b.x, l.b.y]];
+    for (let i = 0; i < poly.length - 1; i++) {
+      const d = segDist(p, poly[i], poly[i + 1]);
+      if (d < bd) { bd = d; best = l; }
+    }
+  }
+  return best;
 }
 
-// click on an empty spot: the end point of the move being made, or the start point of a new one.
-// Both get the current playback time; ⏺ 현재 or the time box next to the point changes it.
-function placeMovePoint(p) {
-  const pos = snapMovePoint(p);
-  const pending = state.moves.find((m) => !m.b);
-  if (pending) {
-    pending.b = pos;
-    pending.t1 = nowT();
-    state.activePt = { id: pending.id, end: "b" };
-    flash(`도착 지점 ${fmtTime(pending.t1)} (⏺ 현재로 시각 변경)`);
-  } else {
-    const mv = { id: "m" + Math.random().toString(36).slice(2, 8), a: pos, b: null, t0: nowT(), t1: null };
-    state.moves.push(mv);
-    state.activePt = { id: mv.id, end: "a" };
-    flash(`출발 지점 ${fmtTime(mv.t0)} · 이제 도착 지점을 클릭하세요`);
-  }
+// a click near a room uses that exact spot
+function snapPos(p) {
+  const room = hitRoom(p);
+  return room ? { floor: room.floor, x: room.x, y: room.y } : { floor: state.viewFloor, x: +p.x.toFixed(1), y: +p.y.toFixed(1) };
+}
+
+const newPoint = (p) => ({ id: "p" + Math.random().toString(36).slice(2, 8), ...snapPos(p), arrive: null, depart: null });
+
+// click on an empty spot: a new point at the end of the path. The first point gets the current time as its
+// departure, every other point as its arrival; the next box to fill (departure) becomes active, so
+// "click the spot on arrival, scrub, ⏺ 현재 on leaving, click the next spot" is the whole rhythm.
+function appendPoint(p) {
+  const pt = newPoint(p);
+  if (!state.path.length) { pt.depart = nowT(); flash(`⌂ 시작 지점 · 출발 ${fmtTime(pt.depart)} (떠나는 순간에 ⏺ 현재)`); }
+  else { pt.arrive = nowT(); flash(`지점 ${state.path.length} · 도착 ${fmtTime(pt.arrive)} · 떠나는 순간에 ⏺ 현재`); }
+  state.path.push(pt);
+  state.active = { id: pt.id, field: "depart" };
   saveRoomsMoves();
 }
 
-// ⏺ 현재: the selected point takes the current playback time
-function stampActivePoint() {
+// click on a leg: a point in between (arrives now, leaves right away until you set it)
+function insertPoint(p, k) {
+  const pt = newPoint(p);
+  pt.arrive = nowT();
+  state.path.splice(k, 0, pt);
+  delete state.path[k + 1].via;   // the leg after it changed shape: its old bends no longer fit
+  state.active = { id: pt.id, field: "depart" };
+  saveRoomsMoves();
+  flash(`지점 ${k} 끼워 넣음 · 도착 ${fmtTime(pt.arrive)}`);
+}
+
+// ⏺ 현재: the active time box takes the playback time; after an arrival the departure box is next
+function stampActive() {
   const ap = activePoint();
   if (!ap) { flash("먼저 도면이나 표에서 지점을 클릭해 선택하세요"); return; }
-  setPtTime(ap.mv, ap.end, nowT());
+  ap.pt[ap.field] = nowT();
+  flash(`${ptName(ap.pt)} ${FIELD_LABEL[ap.field]} → ${fmtTime(nowT())}`);
+  if (ap.field === "arrive") state.active = { id: ap.pt.id, field: "depart" };
   saveRoomsMoves();
-  flash(`이동 ${state.moves.indexOf(ap.mv) + 1} ${ap.end === "a" ? "출발" : "도착"} → ${fmtTime(nowT())}`);
 }
 
-function deleteMove(mv) {
-  const i = state.moves.indexOf(mv);
+function deletePoint(pt) {
+  const i = ptIndex(pt);
   if (i < 0) return;
-  state.moves.splice(i, 1);
-  if (state.activePt?.id === mv.id) state.activePt = null;
+  state.path.splice(i, 1);
+  if (i < state.path.length && i > 0) delete state.path[i].via;   // the leg that now reaches the next point is new
+  if (state.path.length && i === 0) delete state.path[0].via;
+  if (state.active?.id === pt.id) state.active = null;
   saveRoomsMoves();
-  flash("이동 지점 삭제");
+  flash("지점 삭제");
 }
 
-// a new move that leaves from the selected point (same as Shift+clicking it)
-function startMoveFromActive() {
-  const ap = activePoint();
-  if (!ap) { flash("먼저 지점을 선택하세요"); return; }
-  if (state.moves.some((m) => !m.b)) { flash("먼저 진행 중인 이동의 도착 지점을 클릭하세요"); return; }
-  if (ap.mv[ap.end].floor !== state.viewFloor) showFloor(ap.mv[ap.end].floor);
-  placeMovePoint({ x: ap.mv[ap.end].x, y: ap.mv[ap.end].y });
-}
-
-$("#moveNowBtn").addEventListener("click", stampActivePoint);
-$("#moveFromBtn").addEventListener("click", startMoveFromActive);
+$("#moveNowBtn").addEventListener("click", stampActive);
 $("#moveDelBtn").addEventListener("click", () => {
-  const mv = state.activePt && moveById(state.activePt.id);
-  if (mv) deleteMove(mv); else flash("삭제할 이동을 먼저 선택하세요");
+  const pt = state.active && ptById(state.active.id);
+  if (pt) deletePoint(pt); else flash("삭제할 지점을 먼저 선택하세요");
 });
 
-// what the server made of this move (its walk / fade, and the fade-over before it when the marker was elsewhere)
-function trackMove(mv, hop = false) {
-  return state.track?.moves?.find((x) => x.id === mv.id && !!x.hop === hop);
-}
+// what the server made of the leg into this point
+const trackLeg = (pt) => state.track?.moves?.find((x) => x.id === pt.id);
 
-function moveInfo(mv) {
-  if (!mv.b) return `<span class="muted">도착 지점 없음</span>`;
-  if (mv.t0 == null || mv.t1 == null) return `<span class="mv warn">⚠ 시각을 넣어주세요</span>`;
-  if (mv.t1 <= mv.t0) return `<span class="mv warn" title="도착 시각이 출발 시각보다 뒤여야 마커가 움직입니다">⚠ 도착이 출발보다 앞</span>`;
-  const bits = [`<span title="출발·도착 시각으로 속도가 자동으로 정해집니다">${(mv.t1 - mv.t0).toFixed(1)}초 ${mv.a.floor !== mv.b.floor ? "층 이동 (스르르)" : mv.mode === "jump" ? "스르르" : "이동"}</span>`];
-  if (mv.via?.length && canBend(mv)) bits.push(`<span class="mvroute-row">↩ 꺾임 ${mv.via.length}<button data-mv-route-clear="${mv.id}" class="mvroute-clear" title="꺾은 점을 모두 지우고 직선으로 되돌립니다">초기화</button></span>`);
-  if (trackMove(mv, true)) bits.push(`<span title="앞 이동이 끝난 자리와 출발 지점이 달라서 출발 직전에 스르르 옮겨갑니다">출발 전 스르르</span>`);
+// the leg into point k, as shown in the table: duration, kind, bends, warnings
+function legInfo(pt) {
+  const k = ptIndex(pt);
+  if (k <= 0) return `<span class="muted">영상 시작부터 여기</span>`;
+  const prev = state.path[k - 1];
+  const bits = [];
+  const start = prev.depart ?? (k > 1 ? prev.arrive : 0), end = pt.arrive;
+  if (end == null) bits.push(`<span class="warn">⚠ 도착 시각 없음 (떠나는 순간 바로 나타남)</span>`);
+  else if (start != null && end < start) bits.push(`<span class="warn">⚠ 도착이 앞 지점 출발(${fmtTime(start)})보다 앞</span>`);
+  else if (start != null) bits.push(`<span title="출발·도착 시각으로 속도가 자동으로 정해집니다">${(end - start).toFixed(1)}초 ${prev.floor !== pt.floor ? "층 이동 (스르르)" : pt.mode === "jump" ? "스르르" : "이동"}</span>`);
+  const leg = legs()[k - 1];
+  if (pt.via?.length && canBend(leg)) bits.push(`<span class="mvroute-row">↩ 꺾임 ${pt.via.length}<button data-pt-route-clear="${pt.id}" class="mvroute-clear" title="꺾은 점을 모두 지우고 직선으로 되돌립니다">초기화</button></span>`);
   return `<div class="mv">${bits.join(" · ")}</div>`;
 }
 
+// how long the marker rests here
+function stayInfo(pt) {
+  const k = ptIndex(pt), last = k === state.path.length - 1;
+  if (pt.depart == null) return last ? "" : `<span class="warn">⚠ 출발 시각 없음 (도착하자마자 떠남)</span>`;
+  if (k === 0) return "";
+  if (pt.arrive == null) return "";
+  if (pt.depart < pt.arrive) return `<span class="warn">⚠ 출발이 도착보다 앞</span>`;
+  return `머묾 ${(pt.depart - pt.arrive).toFixed(1)}초`;
+}
+
 function renderMoves() {
-  $("#mvCount").textContent = state.moves.length ? `${state.moves.length}개` : "";
-  $("#startInfo").innerHTML = startInfoText();
-  $("#startClearBtn").classList.toggle("hidden", !state.start);
+  $("#mvCount").textContent = state.path.length ? `지점 ${state.path.length}개 · 이동 ${Math.max(0, state.path.length - 1)}개` : "";
   const now = video.currentTime;
-  const fl = (q) => escapeHtml(floorOf(q?.floor)?.label || "");
-  const box = (mv, end) => {
-    const t = ptTime(mv, end);
-    return `<input class="mvtime ${isActivePt(mv, end) ? "active" : ""}" data-mv-time="${mv.id}:${end}" value="${t == null ? "" : fmtTime(t)}" placeholder="분:초"
-      title="${end === "a" ? "출발" : "도착"} 시각 (분:초 또는 초). 클릭하면 이 지점이 선택되어 ⏺ 현재로 시각을 넣을 수 있습니다" />`;
-  };
-  $("#mvTable tbody").innerHTML = state.moves.map((mv, i) => `
-    <tr data-mv="${mv.id}" class="${state.activePt?.id === mv.id ? "active" : ""} ${moveComplete(mv) && now >= mv.t0 && now <= mv.t1 ? "now" : ""}">
-      <td><a href="#" data-mv-seek="${mv.id}" title="출발 시각으로 이동">${i + 1}</a></td>
-      <td>${box(mv, "a")}<div class="mv">${fl(mv.a)}</div></td>
-      <td>${mv.b ? box(mv, "b") + `<div class="mv">${fl(mv.b)}</div>` : `<span class="muted">도면에서 도착 지점을 클릭</span>`}</td>
-      <td>${mv.b && mv.a.floor === mv.b.floor ? `<select data-mv-mode="${mv.id}" class="mvmode" title="걸어서: 직선으로 걷습니다 (④ 경로 꺾기로 꺾을 수 있음) · 스르르: 출발 지점에서 사라졌다 도착 지점에서 나타납니다 (영상이 컷으로 넘어갈 때)">
-          <option value="walk" ${mv.mode !== "jump" ? "selected" : ""}>걸어서</option><option value="jump" ${mv.mode === "jump" ? "selected" : ""}>스르르</option></select>` : ""}${moveInfo(mv)}</td>
-      <td>${moveComplete(mv) && mv.t1 > mv.t0 ? `<button data-mv-play="${mv.id}" title="이 이동만 재생해서 확인 (앞뒤 1초)">▶ 확인</button>` : ""}</td>
-      <td><button data-mv-del="${mv.id}" title="이 이동 삭제">✕</button></td>
-    </tr>`).join("") || `<tr><td colspan="6" class="muted">③ 이동 지점 모드에서 도면을 클릭해 출발·도착 지점을 찍으세요</td></tr>`;
+  const cur = state.track?.moves?.find((m) => m.end > m.start && now >= m.start && now <= m.end)?.id;
+  const fl = (q) => escapeHtml(floorOf(q.floor)?.label || "");
+  const box = (pt, field) => `<input class="mvtime ${isActiveField(pt, field) ? "active" : ""}" data-pt-time="${pt.id}:${field}" value="${pt[field] == null ? "" : fmtTime(pt[field])}" placeholder="분:초"
+      title="${FIELD_LABEL[field]} 시각 (분:초 또는 초). 클릭하면 이 칸이 선택되어 ⏺ 현재로 시각을 넣을 수 있습니다" />`;
+  $("#mvTable tbody").innerHTML = state.path.map((pt, i) => {
+    const last = i === state.path.length - 1;
+    return `
+    <tr data-pt="${pt.id}" class="${isActivePoint(pt) ? "active" : ""} ${cur === pt.id ? "now" : ""}">
+      <td><a href="#" data-pt-seek="${pt.id}" title="이 지점의 시각으로 이동">${i === 0 ? "⌂" : i}</a><div class="mv">${fl(pt)}</div></td>
+      <td>${i === 0 ? `<span class="muted">영상 처음</span>` : box(pt, "arrive")}</td>
+      <td>${box(pt, "depart")}<div class="mv">${last && pt.depart == null ? `<span class="muted">다음 지점을 찍으면 씀</span>` : stayInfo(pt)}</div></td>
+      <td>${i > 0 && state.path[i - 1].floor === pt.floor ? `<select data-pt-mode="${pt.id}" class="mvmode" title="걸어서: 앞 지점에서 직선으로 걷습니다 (④ 경로 꺾기로 꺾을 수 있음) · 스르르: 앞 지점에서 사라졌다 여기서 나타납니다 (영상이 컷으로 넘어갈 때)">
+          <option value="walk" ${pt.mode !== "jump" ? "selected" : ""}>걸어서</option><option value="jump" ${pt.mode === "jump" ? "selected" : ""}>스르르</option></select>` : ""}${legInfo(pt)}</td>
+      <td>${i > 0 ? `<button data-pt-play="${pt.id}" title="앞 지점에서 여기까지의 이동만 재생해서 확인 (앞뒤 1초)">▶ 확인</button>` : ""}</td>
+      <td><button data-pt-del="${pt.id}" title="이 지점 삭제 (앞뒤 지점이 바로 이어집니다)">✕</button></td>
+    </tr>`; }).join("") || `<tr><td colspan="6" class="muted">③ 이동 지점 모드에서 도면을 클릭해 마커가 지나갈 지점을 차례로 찍으세요</td></tr>`;
 }
 
 $("#mvTable").addEventListener("click", (e) => {
-  const sk = e.target.closest("[data-mv-seek]");
+  const sk = e.target.closest("[data-pt-seek]");
   if (sk) {
     e.preventDefault();
-    const mv = moveById(sk.dataset.mvSeek);
-    if (!mv) return;
-    setActivePt(mv, "a");
-    if (mv.t0 != null) { video.pause(); video.currentTime = mv.t0; }
-    if (mv.a.floor !== state.viewFloor) showFloor(mv.a.floor);
+    const pt = ptById(sk.dataset.ptSeek);
+    if (!pt) return;
+    setActive(pt, null);
+    const t = ptIndex(pt) === 0 ? pt.depart : pt.arrive;
+    if (t != null) { video.pause(); video.currentTime = t; }
+    if (pt.floor !== state.viewFloor) showFloor(pt.floor);
   }
-  const pl = e.target.closest("[data-mv-play]");
-  if (pl) { const mv = moveById(pl.dataset.mvPlay); if (mv) playAround(mv.t0, 1, mv.t1); }
-  const rc = e.target.closest("[data-mv-route-clear]");
-  if (rc) { const mv = moveById(rc.dataset.mvRouteClear); if (mv) clearRoute(mv); }
-  const d = e.target.closest("[data-mv-del]");
-  if (d) { const mv = moveById(d.dataset.mvDel); if (mv) deleteMove(mv); }
+  const pl = e.target.closest("[data-pt-play]");
+  if (pl) { const m = trackLeg(ptById(pl.dataset.ptPlay) || {}); if (m) playAround(m.start, 1, m.end); }
+  const rc = e.target.closest("[data-pt-route-clear]");
+  if (rc) { const pt = ptById(rc.dataset.ptRouteClear); if (pt) clearRoute(pt); }
+  const d = e.target.closest("[data-pt-del]");
+  if (d) { const pt = ptById(d.dataset.ptDel); if (pt) deletePoint(pt); }
 });
 $("#mvTable").addEventListener("change", (e) => {
-  const md = e.target.closest("[data-mv-mode]");
+  const md = e.target.closest("[data-pt-mode]");
   if (!md) return;
-  const mv = moveById(md.dataset.mvMode);
-  if (!mv) return;
-  if (md.value === "jump") mv.mode = "jump"; else delete mv.mode;
+  const pt = ptById(md.dataset.ptMode);
+  if (!pt) return;
+  if (md.value === "jump") pt.mode = "jump"; else delete pt.mode;
   saveRoomsMoves();
 });
 
-// the time boxes (in the table and next to the points on the plan) select their point and edit its time
+// the time boxes (in the table and beside the selected point on the plan) select their field and edit its time
 function bindTimeInputs(root) {
   root.addEventListener("focusin", (e) => {
-    const inp = e.target.closest("[data-mv-time]");
+    const inp = e.target.closest("[data-pt-time]");
     if (!inp) return;
-    const [id, end] = inp.dataset.mvTime.split(":");
-    const mv = moveById(id);
-    if (mv && !isActivePt(mv, end)) setActivePt(mv, end);
+    const [id, field] = inp.dataset.ptTime.split(":");
+    const pt = ptById(id);
+    if (pt && !isActiveField(pt, field)) setActive(pt, field);
   });
   root.addEventListener("change", (e) => {
-    const inp = e.target.closest("[data-mv-time]");
+    const inp = e.target.closest("[data-pt-time]");
     if (!inp) return;
-    const [id, end] = inp.dataset.mvTime.split(":");
-    const mv = moveById(id);
-    if (!mv) return;
-    setPtTime(mv, end, parseTime(inp.value));
+    const [id, field] = inp.dataset.ptTime.split(":");
+    const pt = ptById(id);
+    if (!pt) return;
+    pt[field] = parseTime(inp.value);
     saveRoomsMoves();
   });
-  root.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("[data-mv-time]")) e.target.blur(); });
+  root.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("[data-pt-time]")) e.target.blur(); });
 }
 bindTimeInputs($("#mvTable"));
 bindTimeInputs($("#planLabels"));
@@ -1102,83 +1086,63 @@ function showFloor(fid) {
   drawPlan();
 }
 
-// The time box beside each point on the plan. Elements are kept and only moved / re-marked, so
-// typing in one survives redraws (drawPlan runs on every tick while the video plays).
+// The time boxes beside the selected point on the plan (도착 / 출발). The element is kept and only moved /
+// re-marked, so typing in it survives redraws (drawPlan runs on every tick while the video plays).
 function syncPointLabels() {
   const box = $("#planLabels");
-  if (state.mode !== "moves" || !viewImg()) { if (box.childElementCount) box.innerHTML = ""; return; }
+  const ap = activePoint();
+  if (state.mode !== "moves" || !viewImg() || !ap || ap.pt.floor !== state.viewFloor) { if (box.childElementCount) box.innerHTML = ""; return; }
   const k = planCv.getBoundingClientRect().width / viewImg().width;
-  const want = new Map();
-  const ap = activePoint();   // only the selected point shows its time box; the others stay clean
-  if (ap && ap.mv[ap.end].floor === state.viewFloor) want.set(`${ap.mv.id}:${ap.end}`, { mv: ap.mv, end: ap.end, q: ap.mv[ap.end] });
-  for (const el of [...box.children]) if (!want.has(el.dataset.pt)) el.remove();
-  for (const [key, { mv, end, q }] of want) {
-    let el = box.querySelector(`[data-pt="${key}"]`);
-    if (!el) {
-      el = document.createElement("label");
-      el.className = "ptlabel";
-      el.dataset.pt = key;
-      el.innerHTML = `<span class="tag"></span><input data-mv-time="${key}" placeholder="분:초" title="시각 (분:초 또는 초) · Enter로 적용" />`;
-      box.appendChild(el);
-    }
-    // right of the point, or left of it when that would run past the plan's edge
-    const flip = q.x * k + 13 + 110 > planCv.clientWidth;
-    el.style.left = flip ? "" : `${q.x * k + 13}px`;
-    el.style.right = flip ? `${planCv.clientWidth - q.x * k + 13}px` : "";
-    el.style.top = `${q.y * k}px`;
-    el.classList.toggle("start", end === "a");
-    el.classList.toggle("active", isActivePt(mv, end));
-    el.querySelector(".tag").textContent = end === "a" ? "출발" : "도착";
-    const inp = el.querySelector("input");
-    const t = ptTime(mv, end);
-    if (document.activeElement !== inp) inp.value = t == null ? "" : fmtTime(t);
+  const pt = ap.pt, fields = ptFields(pt);
+  let el = box.firstElementChild;
+  if (!el || el.dataset.pt !== pt.id || el.dataset.fields !== fields.join(",")) {
+    box.innerHTML = "";
+    el = document.createElement("div");
+    el.className = "ptlabel";
+    el.dataset.pt = pt.id;
+    el.dataset.fields = fields.join(",");
+    el.innerHTML = `<b class="ptname"></b>` + fields.map((f) =>
+      `<label><span class="tag">${FIELD_LABEL[f]}</span><input data-pt-time="${pt.id}:${f}" placeholder="분:초" title="${FIELD_LABEL[f]} 시각 (분:초 또는 초) · Enter로 적용" /></label>`).join("");
+    box.appendChild(el);
+  }
+  // right of the point, or left of it when that would run past the plan's edge
+  const flip = pt.x * k + 14 + 190 > planCv.clientWidth;
+  el.style.left = flip ? "" : `${pt.x * k + 14}px`;
+  el.style.right = flip ? `${planCv.clientWidth - pt.x * k + 14}px` : "";
+  el.style.top = `${pt.y * k}px`;
+  el.querySelector(".ptname").textContent = ptName(pt);
+  for (const inp of el.querySelectorAll("input")) {
+    const f = inp.dataset.ptTime.split(":")[1];
+    inp.classList.toggle("active", ap.field === f);
+    if (document.activeElement !== inp) inp.value = pt[f] == null ? "" : fmtTime(pt[f]);
   }
 }
 
-// start / end points and the leg between them, on the floor being viewed
+// the path on the floor being viewed: legs with an arrow, points with their number, ⌂ for the first point
 function drawMoves(ctx, u) {
   const fid = state.viewFloor;
-  const s = state.start;
-  if (s && s.floor === fid) {   // the initial position: green ring with a house glyph
-    ctx.save();
-    ctx.lineWidth = 2.5 * u;
-    ctx.strokeStyle = "#16a34a";
-    ctx.fillStyle = "#fff";
-    ctx.beginPath(); ctx.arc(s.x, s.y, 10 * u, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#16a34a";
-    ctx.font = `bold ${12 * u}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("⌂", s.x, s.y + 0.5 * u);
-    ctx.font = `bold ${10 * u}px sans-serif`;
-    ctx.lineWidth = 3 * u;
-    ctx.strokeStyle = "rgba(255,255,255,.9)";
-    ctx.strokeText("초기 위치", s.x, s.y - 17 * u);
-    ctx.fillText("초기 위치", s.x, s.y - 17 * u);
-    ctx.restore();
-  }
-  state.moves.forEach((mv, i) => {
-    const a = mv.a.floor === fid ? mv.a : null, b = mv.b?.floor === fid ? mv.b : null;
-    if (!a && !b) return;
-    ctx.save();
-    ctx.lineJoin = ctx.lineCap = "round";
+  ctx.save();
+  ctx.lineJoin = ctx.lineCap = "round";
+  for (const l of legs()) {
+    const a = l.a.floor === fid ? l.a : null, b = l.b.floor === fid ? l.b : null;
+    if (!a && !b) continue;
     if (a && b) {
-      // the route: straight, or through the bend points set in ④ 경로 꺾기 (a "스르르" move is dashed)
-      const poly = canBend(mv) ? routePoly(mv) : [[a.x, a.y], [b.x, b.y]];
+      // the route: straight, or through the bend points set in ④ 경로 꺾기 (a "스르르" leg is dashed)
+      const poly = canBend(l) ? routePoly(l) : [[a.x, a.y], [b.x, b.y]];
       ctx.strokeStyle = "#2563eb";
       ctx.lineWidth = 2.5 * u;
-      if (!canBend(mv)) ctx.setLineDash([6 * u, 5 * u]);
+      if (!canBend(l)) ctx.setLineDash([6 * u, 5 * u]);
       ctx.beginPath();
       poly.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
       ctx.stroke();
       ctx.setLineDash([]);
-      // arrow head mid-way along the longest leg, pointing towards the end point
-      let leg = 0, best = -1;
+      // arrow head mid-way along the longest straight piece, pointing towards the next point
+      let seg = 0, best = -1;
       for (let k = 0; k < poly.length - 1; k++) {
         const d = Math.hypot(poly[k + 1][0] - poly[k][0], poly[k + 1][1] - poly[k][1]);
-        if (d > best) { best = d; leg = k; }
+        if (d > best) { best = d; seg = k; }
       }
-      const [p0, p1] = [poly[leg], poly[leg + 1]];
+      const [p0, p1] = [poly[seg], poly[seg + 1]];
       const dx = p1[0] - p0[0], dy = p1[1] - p0[1], L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
       if (L > 30 * u) {
         const mx = p0[0] + dx * 0.55, my = p0[1] + dy * 0.55, s = 6 * u;
@@ -1189,47 +1153,38 @@ function drawMoves(ctx, u) {
         ctx.lineTo(mx - ux * s + uy * s * 0.9, my - uy * s - ux * s * 0.9);
         ctx.closePath(); ctx.fill();
       }
-    } else if (mv.b) {   // the other point is on another floor: a short dashed stub says "continues elsewhere"
+    } else {   // the other end is on another floor: a short dashed stub says "continues elsewhere"
       const q = a || b;
       ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 2 * u; ctx.setLineDash([4 * u, 4 * u]);
       ctx.beginPath(); ctx.moveTo(q.x, q.y); ctx.lineTo(q.x + (a ? 22 : -22) * u, q.y); ctx.stroke();
       ctx.setLineDash([]);
     }
-    const dot = (q, end) => {
-      const act = isActivePt(mv, end);
-      ctx.lineWidth = 2.5 * u;
-      ctx.strokeStyle = act ? "#ea580c" : "#2563eb";
-      ctx.fillStyle = end === "b" ? ctx.strokeStyle : "#fff";
-      ctx.beginPath(); ctx.arc(q.x, q.y, 7 * u, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      if (act) { ctx.lineWidth = 2 * u; ctx.beginPath(); ctx.arc(q.x, q.y, 12 * u, 0, Math.PI * 2); ctx.stroke(); }
-    };
-    if (a) dot(a, "a");
-    if (b) dot(b, "b");
-    // the move's number, to match the table: left of the start point (the time box sits on the right)
-    const q = a || b;
-    ctx.font = `bold ${11 * u}px sans-serif`;
+  }
+  state.path.forEach((pt, i) => {
+    if (pt.floor !== fid) return;
+    const act = isActivePoint(pt), first = i === 0;
+    const col = act ? "#ea580c" : first ? "#16a34a" : "#2563eb";
+    ctx.lineWidth = 2.5 * u;
+    ctx.strokeStyle = col;
+    ctx.fillStyle = first ? "#fff" : col;
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, (first ? 10 : 8) * u, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillStyle = "#2563eb";
-    ctx.beginPath(); ctx.arc(q.x - 16 * u, q.y - 12 * u, 8 * u, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#fff";
-    ctx.fillText(String(i + 1), q.x - 16 * u, q.y - 11.5 * u);
-    if (a && !mv.b) {
-      ctx.fillStyle = "#2563eb";
-      ctx.font = `${11 * u}px sans-serif`;
-      ctx.fillText("도착 지점을 클릭하세요", a.x, a.y + 18 * u);
-    }
-    ctx.restore();
+    ctx.fillStyle = first ? col : "#fff";
+    ctx.font = `bold ${(first ? 12 : 9.5) * u}px sans-serif`;
+    ctx.fillText(first ? "⌂" : String(i), pt.x, pt.y + 0.5 * u);
+    if (act) { ctx.lineWidth = 2 * u; ctx.beginPath(); ctx.arc(pt.x, pt.y, 14 * u, 0, Math.PI * 2); ctx.stroke(); }
   });
+  ctx.restore();
 }
 
-// the start / end points of every move, for the timeline (drag to retime, click to seek)
+// every point's arrival (■) and departure (▷) for the timeline (drag to retime, click to seek)
 function movePoints() {
   const out = [];
-  for (const mv of state.moves) {
-    if (mv.t0 != null) out.push({ t: mv.t0, mv, end: "a" });
-    if (mv.b && mv.t1 != null) out.push({ t: mv.t1, mv, end: "b" });
-  }
+  state.path.forEach((pt, i) => {
+    if (i > 0 && pt.arrive != null) out.push({ t: pt.arrive, pt, field: "arrive" });
+    if (pt.depart != null && (i < state.path.length - 1)) out.push({ t: pt.depart, pt, field: "depart" });
+  });
   return out;
 }
 
@@ -1259,7 +1214,6 @@ function setMode(mode) {
   $("#drawBar").classList.toggle("hidden", mode !== "draw");
   $("#routeBar").classList.toggle("hidden", mode !== "route");
   $("#moveBar").classList.toggle("hidden", mode !== "moves");
-  state.placingStart = false;
   if (mode === "moves") refreshActiveMarks();
   $("#routeUndoBtn").disabled = !state.routeUndo.length;
   updatePlanHint();
@@ -2197,15 +2151,15 @@ function drawTimeline() {
     ctx.fillRect(x0 - dpr, y - 3 * dpr, 2 * dpr, h + 3 * dpr);   // departure tick
     ctx.fillRect(x1 - dpr, y - 3 * dpr, 2 * dpr, h + 3 * dpr);   // arrival tick
   }
-  // ③ free moves: ▷ at the start time, ■ at the end time (orange = the selected point)
+  // ③ the path: ▷ where the marker departs a point, ■ where it arrives (orange = the selected box)
   for (const q of movePoints()) {
     const x = X(q.t), y = bandY + bandH + 8 * dpr, r = 5 * dpr;
-    const col = isActivePt(q.mv, q.end) ? "#ea580c" : "#2563eb";
+    const col = isActiveField(q.pt, q.field) ? "#ea580c" : "#2563eb";
     ctx.fillStyle = col;
     ctx.strokeStyle = col;
     ctx.lineWidth = 1.5 * dpr;
     ctx.beginPath();
-    if (q.end === "a") {
+    if (q.field === "depart") {
       ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x - r, y + r); ctx.closePath();
       ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke();
       ctx.fillStyle = col;
@@ -2235,7 +2189,7 @@ timeline.addEventListener("pointerdown", (e) => {
   if (mp) {
     timeline.setPointerCapture(e.pointerId);
     state.tlDrag = { mp, moved: false };
-    setActivePt(mp.mv, mp.end);
+    setActive(mp.pt, mp.field);
     return;
   }
   const sug = state.analysis && nearest(state.analysis.suggestions, t, r);
@@ -2248,7 +2202,7 @@ timeline.addEventListener("pointermove", (e) => {
   const d = state.tlDrag;
   if (d) {
     d.moved = true;
-    setPtTime(d.mp.mv, d.mp.end, +t.toFixed(2));
+    d.mp.pt[d.mp.field] = +t.toFixed(2);
     drawPlan();
     video.currentTime = t;
     drawTimeline();
@@ -2260,7 +2214,7 @@ timeline.addEventListener("pointermove", (e) => {
   const win = state.proj.floors.filter((f) => f.show_start != null || f.show_end != null)
     .map((f) => `${f.label} 도면 ${f.show_start != null ? fmtTime(f.show_start) : "처음"} ~ ${f.show_end != null ? fmtTime(f.show_end) : "끝"}`).join(" · ");
   timeline.style.cursor = mp ? "ew-resize" : "pointer";
-  timeline.title = mp ? `이동 ${state.moves.indexOf(mp.mv) + 1} ${mp.end === "a" ? "출발" : "도착"} ${fmtTime(mp.t)} (드래그로 조정)`
+  timeline.title = mp ? `${ptName(mp.pt)} ${FIELD_LABEL[mp.field]} ${fmtTime(mp.t)} (드래그로 조정)`
     : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
     : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} 출발 ${fmtTime(mv.start)} → 도착 ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
     : win ? `${fmtTime(t)} · ${win}` : fmtTime(t);
@@ -2326,7 +2280,7 @@ function tick() {
   drawPlan();
   drawTimeline();
   const now = video.currentTime;
-  const key = state.moves.find((m) => moveComplete(m) && now >= m.t0 && now <= m.t1)?.id || "";
+  const key = state.track?.moves?.find((m) => m.end > m.start && now >= m.start && now <= m.end)?.id || "";
   if (key !== lastMoveKey) {
     lastMoveKey = key;
     if (!$("#mvTable").contains(document.activeElement)) renderMoves();   // don't pull a time box out from under the typist
@@ -2377,8 +2331,8 @@ document.addEventListener("keydown", (e) => {
   else if (e.code === "ArrowLeft") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(-1); else video.currentTime -= e.shiftKey ? 1 : 10; }
   else if (e.code === "ArrowRight") { e.preventDefault(); if (e.ctrlKey || e.metaKey) stepFrame(1); else video.currentTime += e.shiftKey ? 1 : 10; }
   else if ((e.code === "Delete" || e.code === "Backspace") && state.mode === "moves") {
-    const mv = state.activePt && moveById(state.activePt.id);
-    if (mv) deleteMove(mv);
+    const pt = state.active && ptById(state.active.id);
+    if (pt) deletePoint(pt);
   }
 });
 
