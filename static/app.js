@@ -930,7 +930,7 @@ planCv.addEventListener("contextmenu", (e) => {
   if (hit) deleteRoom(hit);
 });
 
-const ROOM_NAME_EXAMPLES = ["Living Room", "Kitchen", "Room", "Bathroom", "Terrace"];
+const ROOM_NAME_EXAMPLES = ["Entrance", "Living Room", "Kitchen", "Room", "Bathroom", "Terrace"];   // in walk order: the first suggestion is where a tour starts
 
 function suggestRoomName() {
   return ROOM_NAME_EXAMPLES.find((n) => !state.rooms.some((r) => r.name === n)) || "";
