@@ -299,7 +299,7 @@
         <label>마커 크기 <input type="range" min="0.5" max="2" step="0.05" data-setting="marker_size" /></label>
         <label class="chk"><input type="checkbox" data-setting="glow" /> 마커 빛 번짐</label>
         <div class="wide subhead">마커 이동 <small class="muted">(어디로 언제 움직일지는 ③ 이동 지점에서 정합니다)</small></div>
-        <label title="층 이동, 스르르 방식의 이동, 앞 이동이 끝난 자리와 다른 출발 지점으로 옮겨갈 때 사라졌다 나타나는 데 걸리는 시간">스르르 전환 시간 <span class="val" id="fadeVal"></span>
+        <label title="층 이동과 순간이동 방식의 이동에서 마커가 사라졌다 나타나는 데 걸리는 시간">순간이동 시간 <span class="val" id="fadeVal"></span>
           <input type="range" min="0.2" max="2" step="0.1" data-setting="fade_sec" /></label>
         <label title="층별 노출 시작·종료 시각에서 도면이 스르륵 나타나고 사라지는 시간 (도면 위 층 탭 아래에서 시각을 정합니다)">도면 스르륵 시간 <span class="val" id="panelFadeVal"></span>
           <input type="range" min="0" max="3" step="0.1" data-setting="panel_fade_sec" /></label>
@@ -331,6 +331,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=36"></script>
+<script src="/static/app.js?v=37"></script>
 </body>
 </html>

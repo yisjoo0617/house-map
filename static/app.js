@@ -847,7 +847,7 @@ const cssPx = () => viewImg().width / planCv.getBoundingClientRect().width;
 // state.path is the ordered list of points the marker passes: it rests at a point from its arrival until its
 // departure, then travels to the next point, arriving at that point's arrival time. The end of one leg is
 // always the start of the next (one shared point), and every time is the user's own. The first point is
-// where the marker sits from the video start. "via" (bends) and "mode" (걸어서 / 스르르) belong to the leg INTO a point.
+// where the marker sits from the video start. "via" (bends) and "mode" (걸어서 / 순간이동) belong to the leg INTO a point.
 
 const ptById = (id) => state.path.find((q) => q.id === id);
 const ptIndex = (pt) => state.path.indexOf(pt);
@@ -999,7 +999,7 @@ function legInfo(pt) {
   const start = prev.depart ?? (k > 1 ? prev.arrive : 0), end = pt.arrive;
   if (end == null) bits.push(`<span class="warn">⚠ 시작 시각 없음 (앞 지점을 떠나는 순간 바로 나타남)</span>`);
   else if (start != null && end < start) bits.push(`<span class="warn">⚠ 시작이 앞 지점 종료(${fmtTime(start)})보다 앞</span>`);
-  else if (start != null) bits.push(`<span title="앞 지점 종료 ~ 이 지점 시작 사이로 속도가 자동으로 정해집니다">${(end - start).toFixed(1)}초 ${prev.floor !== pt.floor ? "층 이동 (스르르)" : pt.mode === "jump" ? "스르르" : "이동"}</span>`);
+  else if (start != null) bits.push(`<span title="앞 지점 종료 ~ 이 지점 시작 사이로 속도가 자동으로 정해집니다">${(end - start).toFixed(1)}초 ${prev.floor !== pt.floor ? "층 이동 (순간이동)" : pt.mode === "jump" ? "순간이동" : "이동"}</span>`);
   const leg = legs()[k - 1];
   if (pt.via?.length && canBend(leg)) bits.push(`<span class="mvroute-row">↩ 꺾임 ${pt.via.length}<button data-pt-route-clear="${pt.id}" class="mvroute-clear" title="꺾은 점을 모두 지우고 직선으로 되돌립니다">초기화</button></span>`);
   return `<div class="mv">${bits.join(" · ")}</div>`;
@@ -1029,8 +1029,8 @@ function renderMoves() {
       <td><a href="#" data-pt-seek="${pt.id}" title="이 지점의 시각으로 이동">${i === 0 ? "⌂" : i}</a><div class="mv">${fl(pt)}</div></td>
       <td>${i === 0 ? `<span class="muted">영상 처음</span>` : box(pt, "arrive")}</td>
       <td>${box(pt, "depart")}<div class="mv">${last && pt.depart == null ? `<span class="muted">다음 지점을 찍으면 씀</span>` : stayInfo(pt)}</div></td>
-      <td>${i > 0 && state.path[i - 1].floor === pt.floor ? `<select data-pt-mode="${pt.id}" class="mvmode" title="걸어서: 앞 지점에서 직선으로 걷습니다 (④ 경로 꺾기로 꺾을 수 있음) · 스르르: 앞 지점에서 사라졌다 여기서 나타납니다 (영상이 컷으로 넘어갈 때)">
-          <option value="walk" ${pt.mode !== "jump" ? "selected" : ""}>걸어서</option><option value="jump" ${pt.mode === "jump" ? "selected" : ""}>스르르</option></select>` : ""}${legInfo(pt)}</td>
+      <td>${i > 0 && state.path[i - 1].floor === pt.floor ? `<select data-pt-mode="${pt.id}" class="mvmode" title="걸어서: 앞 지점에서 직선으로 걷습니다 (④ 경로 꺾기로 꺾을 수 있음) · 순간이동: 앞 지점에서 사라졌다 여기서 나타납니다 (영상이 컷으로 넘어갈 때)">
+          <option value="walk" ${pt.mode !== "jump" ? "selected" : ""}>걸어서</option><option value="jump" ${pt.mode === "jump" ? "selected" : ""}>순간이동</option></select>` : ""}${legInfo(pt)}</td>
       <td>${i > 0 ? `<button data-pt-play="${pt.id}" title="앞 지점에서 여기까지의 이동만 재생해서 확인 (앞뒤 1초)">▶ 확인</button>` : ""}</td>
       <td><button data-pt-del="${pt.id}" title="이 지점 삭제 (앞뒤 지점이 바로 이어집니다)">✕</button></td>
     </tr>`; }).join("") || `<tr><td colspan="6" class="muted">③ 이동 지점 모드에서 도면을 클릭해 마커가 지나갈 지점을 차례로 찍으세요</td></tr>`;
@@ -1138,7 +1138,7 @@ function drawMoves(ctx, u) {
     const a = l.a.floor === fid ? l.a : null, b = l.b.floor === fid ? l.b : null;
     if (!a && !b) continue;
     if (a && b) {
-      // the route: straight, or through the bend points set in ④ 경로 꺾기 (a "스르르" leg is dashed)
+      // the route: straight, or through the bend points set in ④ 경로 꺾기 (a "순간이동" leg is dashed)
       const poly = canBend(l) ? routePoly(l) : [[a.x, a.y], [b.x, b.y]];
       ctx.strokeStyle = "#2563eb";
       ctx.lineWidth = 2.5 * u;
@@ -2227,7 +2227,7 @@ timeline.addEventListener("pointermove", (e) => {
   timeline.style.cursor = mp ? "ew-resize" : "pointer";
   timeline.title = mp ? `${ptName(mp.pt)} ${FIELD_LABEL[mp.field]} ${fmtTime(mp.t)} (드래그로 조정)`
     : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
-    : mv ? `${mv.kind === "fade" ? "스르르 전환" : "이동"} ${fmtTime(mv.start)} → ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
+    : mv ? `${mv.kind === "fade" ? "순간이동" : "이동"} ${fmtTime(mv.start)} → ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
     : win ? `${fmtTime(t)} · ${win}` : fmtTime(t);
 });
 

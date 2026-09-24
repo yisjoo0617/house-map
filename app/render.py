@@ -55,7 +55,7 @@ DEFAULT_SETTINGS = {
     "marker_color": "#ffffff",
     "marker_size": 1.0,
     "glow": True,
-    "fade_sec": 0.6,           # fade-out + fade-in time (floor changes, "스르르" moves, fading over to a move's start point)
+    "fade_sec": 0.6,           # fade-out + fade-in time (floor changes, "순간이동" moves)
     "panel_fade_sec": 0.6,     # the plan itself eases in/out at each floor's show window
     # output
     "overlay_codec": "qtrle",  # qtrle: QuickTime Animation (lossless, ~100MB / 10 min 2K) | prores: ProRes 4444 (~4.5GB)
