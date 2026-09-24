@@ -45,8 +45,8 @@
       <caption>① 도면 다듬기</caption>
       <tr><td><kbd>L</kbd> / <kbd>T</kbd></td><td>선 / 얇은 선 (드래그, <kbd>Alt</kbd>는 자유 각도)</td></tr>
       <tr><td><kbd>D</kbd> / <kbd>S</kbd> / <kbd>B</kbd></td><td>문 / 계단 / 변기</td></tr>
-      <tr><td>도형 드래그</td><td>그려진 도형 옮기기 · 끝점·모서리·변 드래그 = 크기 조절 (선은 Ctrl / Shift+드래그)</td></tr>
-      <tr><td>도형 클릭 → <kbd>Del</kbd></td><td>클릭 = 선택 (선 포함), 선택한 도형 삭제 · <kbd>Esc</kbd> = 선택 해제</td></tr>
+      <tr><td>도형 클릭</td><td>선택 (선 포함) · 새로 그린 도형은 바로 선택됨 · <kbd>Esc</kbd> = 선택 해제</td></tr>
+      <tr><td>선택한 도형 드래그</td><td>옮기기 · 끝점·모서리·변 드래그 = 크기 조절 · <kbd>Del</kbd> = 삭제</td></tr>
       <tr><td><kbd>R</kbd> / <kbd>C</kbd></td><td>사각형 / 원</td></tr>
       <tr><td><kbd>W</kbd> / <kbd>K</kbd> / <kbd>I</kbd> / <kbd>O</kbd></td><td>세면대 / 싱크대 / 인덕션 / 옷장</td></tr>
       <tr><td><kbd>F</kbd></td><td>뒤집기 (문·변기·계단 클릭)</td></tr>
@@ -203,9 +203,9 @@
         <div class="tools">
           <button data-tool="line" class="active" title="선 (L): 드래그. 수평·수직에 자동으로 맞춰지고 Alt를 누르면 자유 각도">／ 선</button>
           <button data-tool="thinline" title="얇은 선 (T): 창, 칸막이, 바닥 단차 등. 수평·수직 자동 맞춤, Alt는 자유 각도">┄ 얇은 선</button>
-          <button data-tool="door" title="문 (D): 경첩 위치에서 문 끝까지 드래그. 그려진 문은 드래그로 옮기고 끝점을 끌어 크기를 바꿉니다 (여는 방향은 ⇄ 뒤집기)">◜ 문</button>
-          <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그. 그려진 계단은 드래그로 옮기고 모서리·변을 끌어 크기를 바꿉니다 (단 방향은 ⇄ 뒤집기)">▤ 계단</button>
-          <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (옆면은 곧고 앞쪽만 둥근 D 모양). 그려진 변기는 드래그로 옮기고 끝점을 끌어 크기를 바꿉니다 (방향은 ⇄ 뒤집기)">◗ 변기</button>
+          <button data-tool="door" title="문 (D): 경첩 위치에서 문 끝까지 드래그. 그려진 문은 클릭해 선택한 뒤 드래그로 옮기고 끝점을 끌어 크기를 바꿉니다 (여는 방향은 ⇄ 뒤집기)">◜ 문</button>
+          <button data-tool="stairs" title="계단 (S): 계단 영역을 사각형으로 드래그. 그려진 계단은 클릭해 선택한 뒤 드래그로 옮기고 모서리·변을 끌어 크기를 바꿉니다 (단 방향은 ⇄ 뒤집기)">▤ 계단</button>
+          <button data-tool="toilet" title="변기 (B): 벽에 붙는 쪽 가운데에서 앞쪽으로 드래그 (옆면은 곧고 앞쪽만 둥근 D 모양). 그려진 변기는 클릭해 선택한 뒤 드래그로 옮기고 끝점을 끌어 크기를 바꿉니다 (방향은 ⇄ 뒤집기)">◗ 변기</button>
           <button data-tool="basin" title="세면대 (W): 모서리에서 모서리로 드래그 (상판 + 타원 볼)">◍ 세면대</button>
           <button data-tool="sink" title="주방 싱크대 (K): 모서리에서 모서리로 드래그 (상판 + 사각 볼)">▣ 싱크대</button>
           <button data-tool="induction" title="인덕션 (I): 모서리에서 모서리로 드래그 (정사각에 가까우면 화구 4개, 길쭉하면 3개)">⊞ 인덕션</button>
@@ -332,6 +332,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=32"></script>
+<script src="/static/app.js?v=33"></script>
 </body>
 </html>

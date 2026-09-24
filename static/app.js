@@ -634,7 +634,7 @@ $("#routeUndoBtn").addEventListener("click", undoRoute);
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭 = 선택 (Del 삭제 · Ctrl+C 복사 · Ctrl+V 마우스 위치에 붙여넣기) · 뒤집기는 ⇄ 도구 · 선은 Ctrl+드래그로 옮기고 Shift+드래그로 크기 조절 · Ctrl+Shift+드래그 = 복사해서 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭 = 선택 → 선택한 도형만 드래그로 옮기고 손잡이로 크기 조절 (Del 삭제 · Ctrl+C 복사 · Ctrl+V 마우스 위치에 붙여넣기) · 뒤집기는 ⇄ 도구 · Ctrl+Shift+드래그 = 복사해서 옮기기"
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
@@ -1331,7 +1331,7 @@ function moveCursor(e, p) {
     planCv.style.cursor = hitHandle(p) || hitEdit(p, SHAPE_TYPES, true) ? "nwse-resize" : "crosshair";
     return;
   }
-  if (p && manipTool() && !e.ctrlKey && !e.metaKey) {   // a drawn shape under a drawing tool: handle = resize, body = move
+  if (p && manipTool() && !e.ctrlKey && !e.metaKey) {   // over the selected item: handle = resize, body = move
     const m = manipTarget(p);
     if (m) { planCv.style.cursor = m.h ? "nwse-resize" : "grab"; return; }
   }
@@ -1339,10 +1339,9 @@ function moveCursor(e, p) {
     : (e.ctrlKey || e.metaKey) && over ? "grab" : "crosshair";
 }
 
-// ---- direct manipulation: with any drawing tool, pressing on a drawn shape (not a line) resizes it by its
-// handle or moves it by its body; lines keep drawing from where you press so walls can be joined ----
+// ---- direct manipulation: a click selects an item; only the selected item can then be dragged (move) or
+// pulled by its handles (resize), so drawing over other shapes never disturbs them ----
 
-const MANIP_TYPES = ["door", "stairs", "toilet", "rect", "circle", "basin", "sink", "induction", "closet"];
 const manipTool = () => !["erase", "flip", "copy", "delete", "resize"].includes(state.tool);
 
 // the selected drawn item (a plain click on a shape, or Ctrl+click on anything): Del removes it
@@ -1392,12 +1391,23 @@ function pasteEdit() {
   flash(at ? "붙여넣기" : "붙여넣기 (원본 옆에)");
 }
 
-// {e, h} for a handle under the pointer, {e} for a shape body, or null
+// the selected item under the pointer: {e, h} on one of its handles, {e} on its body, or null
 function manipTarget(p) {
-  const hh = hitHandle(p, undefined, MANIP_TYPES);
-  if (hh) return hh;
-  const e = hitEdit(p, MANIP_TYPES, true);
-  return e ? { e } : null;
+  const e = state.selectedEdit;
+  if (!e || !curEdits().includes(e) || e.type === "erase") return null;
+  const tol = 10 * cssPx();
+  let best = null, bd = tol;
+  for (const h of editHandles(e)) {
+    const d = Math.hypot(h.pt[0] - p.x, h.pt[1] - p.y);
+    if (d < bd) { bd = d; best = h; }
+  }
+  if (best) return { e, h: best };
+  let d = Math.min(...editSegments(e).map(([a, b]) => segDist(p, a, b)));
+  if (e.type === "door") {
+    const r = Math.hypot(e.end[0] - e.hinge[0], e.end[1] - e.hinge[1]);
+    d = Math.min(d, Math.abs(Math.hypot(p.x - e.hinge[0], p.y - e.hinge[1]) - r));
+  }
+  return insideEdit(e, p) || d < 8 * cssPx() ? { e } : null;
 }
 
 // ---- resize: drag an endpoint / corner / side of a drawn item (resize tool, or Shift+drag with any tool) ----
@@ -1507,7 +1517,12 @@ function drawDown(e) {
   const p = planPoint(e);
   planCv.setPointerCapture(e.pointerId);
   const t = state.tool;
-  state.selectedEdit = null;   // set again below when the press lands on a shape
+  if (manipTool() && !e.ctrlKey && !e.metaKey && !resizeGesture(e)) {   // the selected item: handle resizes, body moves
+    const m = manipTarget(p);
+    if (m?.h) { startResize(p, m); return; }
+    if (m) { startMove(p, m.e, false); return; }
+  }
+  state.selectedEdit = null;   // set again on a plain click (drawUp) or when a new item is drawn
   if (e.ctrlKey || e.metaKey) {   // Ctrl+drag moves, Ctrl+Shift+drag drags a copy
     const hit = hitEdit(p, SHAPE_TYPES, true);   // never an eraser stroke: those are invisible outside the delete tool
     if (hit) startMove(p, hit, e.shiftKey);
@@ -1532,11 +1547,6 @@ function drawDown(e) {
     const hit = hitEdit(p, FLIPPABLE, true);
     if (hit) state.drawing = { type: "flip", target: hit, start: p };
     return;
-  }
-  if (manipTool()) {   // pressing on a drawn shape: its handle resizes it, its body moves it
-    const m = manipTarget(p);
-    if (m?.h) { startResize(p, m); return; }
-    if (m) { startMove(p, m.e, false); return; }
   }
   const s = t === "erase" ? p : snapPoint(p, null, e.altKey);
   const r = (+$("#eraseSize").value) * cssPx();
@@ -1607,6 +1617,7 @@ function drawUp() {
   else if (d.type === "stairs") curEdits().push({ type: "stairs", a: [d.start.x, d.start.y], b: [d.end.x, d.end.y] });
   else if (d.type === "thinline") curEdits().push({ type: "line", pts: [[d.start.x, d.start.y], [d.end.x, d.end.y]], thin: true });
   else curEdits().push({ ...previewShape(d), thin: $("#shapesThin").checked });  // toilet / rect / circle / fixtures
+  if (d.type !== "erase") state.selectedEdit = curEdits()[curEdits().length - 1];   // the new item is selected: move / resize it right away
   saveEdits(d.type === "erase");
 }
 
@@ -1862,10 +1873,8 @@ function drawEditsLayer(ctx, u) {
   else if (!d && state.hover && (state.tool === "resize" || state.shiftDown)) {
     const t = resizeTarget(state.hover);
     if (t) drawHandles(ctx, t.e, u, hitHandle(state.hover)?.h);
-  } else if (!d && state.hover && manipTool()) {   // the shape under the pointer shows its handles
-    const m = manipTarget(state.hover);
-    if (m) drawHandles(ctx, m.e, u, m.h);
   }
+
   if (d && d.type !== "flip" && d.type !== "move" && d.type !== "resize") {
     if (d.type === "erase") {
       // nothing to draw: the ink layer above already shows the stroke wiping the lines
