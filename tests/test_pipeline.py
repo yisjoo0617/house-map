@@ -359,3 +359,16 @@ def test_upload_runs_auto_detection_and_redetect_api(sample):
     edits = r.json()["floors"][0]["edits"]
     assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[-1] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
     client.delete(f"/api/projects/{pid}")
+
+
+def test_a_floor_can_have_several_show_windows():
+    from app.render import show_windows
+    from app.track import plan_only_track
+    floors = [{"shows": [{"start": 1.0, "end": 3.0}, {"start": 6.0, "end": None}]}, {"shows": [{"start": 3.0, "end": 6.0}]},
+              {"show_start": 2.0, "show_end": None}]                                   # an older file's single pair
+    assert show_windows(floors) == [[(1.0, 3.0), (6.0, None)], [(3.0, 6.0)], [(2.0, None)]]
+    t = np.array([0.5, 2.0, 4.0, 7.0])
+    tr = plan_only_track(t, show_windows(floors[:2]), {"panel_fade_sec": 0.0})
+    assert tr["pfloor"].tolist() == [-1, 0, 1, 0]                                      # 1F, then 2F, then 1F again
+    tr = compute_track([PT("a")], ["f1", "f2"], t, {"panel_fade_sec": 0.0}, windows=show_windows(floors[:2]))
+    assert tr["pfloor"].tolist() == [-1, 0, 1, 0]

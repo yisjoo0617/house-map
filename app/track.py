@@ -94,7 +94,7 @@ def compute_track(
     floor_ids: list[str],
     times: np.ndarray,
     settings: dict | None = None,
-    windows: list[tuple[float | None, float | None]] | None = None,   # per floor: (show start, show end)
+    windows=None,   # per floor: a list of (show start, show end) windows, or one such tuple
 ) -> dict | None:
     """Per-time floor index, x, y, marker opacity and panel opacity (or None if the path is empty)."""
     settings = settings or {}
@@ -138,11 +138,11 @@ def compute_track(
     return {"t": times, "floor": floor, "x": x, "y": y, "alpha": alpha, "pfloor": pfloor, "panel": panel, "moves": info}
 
 
-def plan_only_track(times: np.ndarray, windows: list[tuple[float | None, float | None]], settings: dict | None = None) -> dict | None:
+def plan_only_track(times: np.ndarray, windows, settings: dict | None = None) -> dict | None:
     """With no path there is no marker, but floors with a show window can still be on screen.
     Returns a track like compute_track's with the marker hidden everywhere, or None if no window is set."""
     settings = settings or {}
-    if not any(w != (None, None) for w in windows):
+    if not any(floor_windows(windows)):
         return None
     times = np.asarray(times, dtype=float)
     n = len(times)
@@ -151,8 +151,19 @@ def plan_only_track(times: np.ndarray, windows: list[tuple[float | None, float |
             "pfloor": pfloor, "panel": panel, "moves": []}
 
 
-def panel_plan(times: np.ndarray, floor: np.ndarray, windows: list[tuple[float | None, float | None]],
-               fade: float) -> tuple[np.ndarray, np.ndarray]:
+def floor_windows(windows) -> list[list[tuple[float | None, float | None]]]:
+    """Per floor, its show windows as a list of (start, end). Accepts one (start, end) tuple per floor too
+    ((None, None) = no window) so older callers keep working."""
+    out = []
+    for w in windows or []:
+        if isinstance(w, tuple):
+            out.append([] if w == (None, None) else [w])
+        else:
+            out.append([(s, e) for s, e in (w or []) if not (s is None and e is None)])
+    return out
+
+
+def panel_plan(times: np.ndarray, floor: np.ndarray, windows, fade: float) -> tuple[np.ndarray, np.ndarray]:
     """Which plan is on screen per frame (-1 = none) and its opacity 0..1.
 
     A floor with a show window (start/end in seconds, None = video edge) is on screen exactly inside that
@@ -162,17 +173,17 @@ def panel_plan(times: np.ndarray, floor: np.ndarray, windows: list[tuple[float |
     Only one plan is ever on screen, so two floors never show together."""
     n = len(times)
     pf = np.full(n, -1, dtype=int)
-    auto = [i for i, w in enumerate(windows) if w == (None, None)] if windows else list(range(int(floor.max()) + 1))
+    wins = floor_windows(windows)
+    auto = [i for i, w in enumerate(wins) if not w] if wins else list(range(int(floor.max()) + 1))
     auto = [i for i in auto if i >= 0]
     on_auto = np.isin(floor, auto)
     pf[on_auto] = floor[on_auto]
     best_start = np.full(n, -np.inf)
-    for i, (s0, e0) in enumerate(windows):
-        if s0 is None and e0 is None:
-            continue
-        lo, hi = (-np.inf if s0 is None else float(s0)), (np.inf if e0 is None else float(e0))
-        sel = (times >= lo) & (times < hi) & (lo >= best_start)
-        pf[sel], best_start[sel] = i, lo
+    for i, spans in enumerate(wins):
+        for s0, e0 in spans:
+            lo, hi = (-np.inf if s0 is None else float(s0)), (np.inf if e0 is None else float(e0))
+            sel = (times >= lo) & (times < hi) & (lo >= best_start)
+            pf[sel], best_start[sel] = i, lo
     # ease at every change of the plan on screen
     pa = np.where(pf >= 0, 1.0, 0.0)
     fade = max(float(fade), 1e-6)

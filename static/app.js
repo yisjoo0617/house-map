@@ -315,31 +315,51 @@ function renderFloorTabs() {
 
 // ---------------- per-floor show window (when this plan appears / disappears) ----------------
 
+// a floor can be on screen in several windows: floor.shows = [{start, end}, ...] (null = video edge)
+const floorShows = (f) => (f.shows ||= []);
+
 function renderFloorShow() {
   const f = floorOf(state.viewFloor);
   if (!f) return;
   const v = (x) => (x == null ? "" : fmtTime(x));
+  const rows = floorShows(f).map((w, i) => `
+    <span class="show-row">
+      <span class="muted">${floorShows(f).length > 1 ? `구간 ${i + 1}` : "구간"}</span>
+      <label>시작 <input data-show="${i}:start" value="${v(w.start)}" placeholder="영상 처음" title="이 층 도면이 나타나는 시각 (분:초 또는 초)" /></label>
+      <button data-show-now="${i}:start" title="현재 재생 시각을 시작으로">⏺ 현재</button>
+      <span class="muted">~</span>
+      <label>종료 <input data-show="${i}:end" value="${v(w.end)}" placeholder="영상 끝" title="이 층 도면이 사라지는 시각 (분:초 또는 초)" /></label>
+      <button data-show-now="${i}:end" title="현재 재생 시각을 종료로">⏺ 현재</button>
+      <button data-show-del="${i}" title="이 구간 삭제">✕</button>
+    </span>`).join("");
   $("#floorShow").innerHTML = `
     <span class="muted">${escapeHtml(f.label)} 도면 노출</span>
-    <label>시작 <input data-show="show_start" value="${v(f.show_start)}" placeholder="영상 처음" title="이 층 도면이 나타나는 시각 (분:초 또는 초)" /></label>
-    <button data-show-now="show_start" title="현재 재생 시각을 시작으로">⏺ 현재</button>
-    <span class="muted">~</span>
-    <label>종료 <input data-show="show_end" value="${v(f.show_end)}" placeholder="영상 끝" title="이 층 도면이 사라지는 시각 (분:초 또는 초)" /></label>
-    <button data-show-now="show_end" title="현재 재생 시각을 종료로">⏺ 현재</button>
-    ${f.show_start != null || f.show_end != null ? `<button data-show-clear title="이 층은 항상 노출">지우기</button>` : ""}
+    ${rows}
+    <button data-show-add title="이 층 도면이 보이는 구간을 하나 더 추가합니다 (같은 층이 영상에 여러 번 나올 때)">+ 구간 추가</button>
     <span class="muted small">${showNote(f)}</span>`;
 }
 
-// "1F 0:10 ~ 2:30" checks: a window that ends before it starts, or overlaps another floor's window
+// checks: a window that ends before it starts, or overlaps another window (of this floor or another)
 function showNote(f) {
-  const a0 = f.show_start ?? 0, a1 = f.show_end ?? Infinity;
-  if (a1 <= a0) return "⚠ 종료가 시작보다 앞입니다";
-  for (const g of state.proj.floors) {
-    if (g === f || (g.show_start == null && g.show_end == null)) continue;
-    const b0 = g.show_start ?? 0, b1 = g.show_end ?? Infinity;
-    if (a0 < b1 && b0 < a1) return `⚠ ${escapeHtml(g.label)} 노출 구간과 겹칩니다 (겹치는 동안은 나중에 시작한 층이 보입니다)`;
+  const mine = floorShows(f);
+  for (const [i, w] of mine.entries()) {
+    const a0 = w.start ?? 0, a1 = w.end ?? Infinity;
+    if (a1 <= a0) return `⚠ 구간 ${i + 1}: 종료가 시작보다 앞입니다`;
+    for (const [j, u] of mine.entries()) {
+      if (j <= i) continue;
+      const b0 = u.start ?? 0, b1 = u.end ?? Infinity;
+      if (a0 < b1 && b0 < a1) return `⚠ 구간 ${i + 1}과 ${j + 1}이 겹칩니다`;
+    }
+    for (const g of state.proj.floors) {
+      if (g === f) continue;
+      for (const u of floorShows(g)) {
+        const b0 = u.start ?? 0, b1 = u.end ?? Infinity;
+        if (a0 < b1 && b0 < a1) return `⚠ 구간 ${i + 1}이 ${escapeHtml(g.label)} 노출 구간과 겹칩니다 (겹치는 동안은 나중에 시작한 층이 보입니다)`;
+      }
+    }
   }
-  return f.show_start == null && f.show_end == null ? "구간을 정하지 않으면 마커가 이 층에 있을 때 보입니다" : "이 구간에는 마커 위치와 상관없이 이 층 도면이 보이고, 마커는 이 층에 있을 때만 나타납니다";
+  return mine.length ? "이 구간들에는 마커 위치와 상관없이 이 층 도면이 보이고, 마커는 이 층에 있을 때만 나타납니다"
+    : "구간을 정하지 않으면 마커가 이 층에 있을 때 보입니다 · 같은 층이 영상에 여러 번 나오면 구간을 여러 개 추가하세요";
 }
 
 function parseTime(str) {
@@ -353,17 +373,30 @@ function parseTime(str) {
 $("#floorShow").addEventListener("change", (e) => {
   const inp = e.target.closest("[data-show]");
   if (!inp) return;
-  const f = floorOf(state.viewFloor);
-  const v = parseTime(inp.value);
-  if (v == null) delete f[inp.dataset.show]; else f[inp.dataset.show] = v;
+  const [i, key] = inp.dataset.show.split(":");
+  const w = floorShows(floorOf(state.viewFloor))[+i];
+  if (!w) return;
+  w[key] = parseTime(inp.value);
   renderFloorShow();
   saveEdits();
 });
 $("#floorShow").addEventListener("click", (e) => {
-  const now = e.target.closest("[data-show-now]");
   const f = floorOf(state.viewFloor);
-  if (now) { f[now.dataset.showNow] = +video.currentTime.toFixed(2); renderFloorShow(); saveEdits(); }
-  else if (e.target.closest("[data-show-clear]")) { delete f.show_start; delete f.show_end; renderFloorShow(); saveEdits(); }
+  const now = e.target.closest("[data-show-now]");
+  const del = e.target.closest("[data-show-del]");
+  if (now) {
+    const [i, key] = now.dataset.showNow.split(":");
+    const w = floorShows(f)[+i];
+    if (!w) return;
+    w[key] = +video.currentTime.toFixed(2);
+  } else if (del) {
+    floorShows(f).splice(+del.dataset.showDel, 1);
+  } else if (e.target.closest("[data-show-add]")) {
+    // a new window starts at the playhead and runs to the video end until its end is set
+    floorShows(f).push({ start: +video.currentTime.toFixed(2), end: null });
+  } else return;
+  renderFloorShow();
+  saveEdits();
 });
 
 $("#floorTabs").addEventListener("click", async (e) => {
@@ -2148,10 +2181,11 @@ function drawTimeline() {
   ctx.fillStyle = "rgba(120,120,120,.25)";
   ctx.fillRect(0, sy, W, sh);
   state.proj.floors.forEach((f, i) => {
-    if (f.show_start == null && f.show_end == null) return;
-    const x0 = X(f.show_start ?? 0), x1 = X(Math.min(f.show_end ?? dur, dur));
-    ctx.fillStyle = i % 2 ? "rgba(139, 92, 246, .8)" : "rgba(16, 185, 129, .8)";
-    ctx.fillRect(x0, sy, Math.max(x1 - x0, dpr), sh);
+    for (const w of floorShows(f)) {
+      const x0 = X(w.start ?? 0), x1 = X(Math.min(w.end ?? dur, dur));
+      ctx.fillStyle = i % 2 ? "rgba(139, 92, 246, .8)" : "rgba(16, 185, 129, .8)";
+      ctx.fillRect(x0, sy, Math.max(x1 - x0, dpr), sh);
+    }
   });
   // when the marker is actually on the move: a strip from departure to arrival along the bottom of the bands
   for (const m of state.track?.moves || []) {
@@ -2222,8 +2256,8 @@ timeline.addEventListener("pointermove", (e) => {
   const mp = nearest(movePoints(), t, r);
   const sug = state.analysis && nearest(state.analysis.suggestions, t, r);
   const mv = state.track?.moves?.find((m) => m.end > m.start && t >= m.start && t <= m.end);
-  const win = state.proj.floors.filter((f) => f.show_start != null || f.show_end != null)
-    .map((f) => `${f.label} 도면 ${f.show_start != null ? fmtTime(f.show_start) : "처음"} ~ ${f.show_end != null ? fmtTime(f.show_end) : "끝"}`).join(" · ");
+  const win = state.proj.floors.flatMap((f) => floorShows(f)
+    .map((w) => `${f.label} 도면 ${w.start != null ? fmtTime(w.start) : "처음"} ~ ${w.end != null ? fmtTime(w.end) : "끝"}`)).join(" · ");
   timeline.style.cursor = mp ? "ew-resize" : "pointer";
   timeline.title = mp ? `${ptName(mp.pt)} ${FIELD_LABEL[mp.field]} ${fmtTime(mp.t)} (드래그로 조정)`
     : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`

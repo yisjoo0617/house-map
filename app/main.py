@@ -107,7 +107,7 @@ def title_of(proj: dict) -> str:
 
 def floors_for_render(d: Path, proj: dict) -> list[dict]:
     return [{"id": f["id"], "label": f["label"], "path": d / f["file"], "edits": f.get("edits", []),
-             "show_start": f.get("show_start"), "show_end": f.get("show_end")} for f in proj["floors"]]
+             "shows": f.get("shows", [])} for f in proj["floors"]]
 
 
 def public_project(pid: str) -> dict:
@@ -322,6 +322,10 @@ def upgrade_project(proj: dict) -> dict:
         proj.pop("moves", None)
         proj.pop("start", None)
         proj.pop("events", None)
+    for f in proj.get("floors", []):   # one show window per floor became a list of windows
+        if "shows" not in f:
+            s0, e0 = f.pop("show_start", None), f.pop("show_end", None)
+            f["shows"] = [] if s0 is None and e0 is None else [{"start": s0, "end": e0}]
     return proj
 
 
@@ -333,9 +337,8 @@ def update_project(pid: str, body: ProjectUpdate):
     if body.floors is not None:
         by_id = {f["id"]: f for f in proj["floors"]}
 
-        def show_time(f, key):
+        def show_time(v):
             # when this floor's plan appears / disappears (seconds); None = video edge
-            v = f.get(key, by_id[f["id"]].get(key)) if key in f else by_id[f["id"]].get(key)
             if v in (None, ""):
                 return None
             try:
@@ -343,9 +346,21 @@ def update_project(pid: str, body: ProjectUpdate):
             except (TypeError, ValueError):
                 raise HTTPException(400, "도면 노출 시각이 잘못되었습니다")
 
+        def shows(f):
+            if "shows" not in f:
+                return by_id[f["id"]].get("shows", [])
+            out = []
+            for w in f["shows"] or []:
+                if not isinstance(w, dict):
+                    raise HTTPException(400, "도면 노출 구간이 잘못되었습니다")
+                s0, e0 = show_time(w.get("start")), show_time(w.get("end"))
+                if s0 is not None or e0 is not None:
+                    out.append({"start": s0, "end": e0})
+            return out
+
         proj["floors"] = [{**by_id[f["id"]], "label": str(f.get("label", by_id[f["id"]]["label"])),
                            "edits": clean_edits(f["edits"]) if "edits" in f else by_id[f["id"]].get("edits", []),
-                           "show_start": show_time(f, "show_start"), "show_end": show_time(f, "show_end")}
+                           "shows": shows(f)}
                           for f in body.floors if f.get("id") in by_id]
     floor_ids = {f["id"] for f in proj["floors"]}
     if body.rooms is not None:

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>House-Map 미니맵 생성기</title>
-  <link rel="stylesheet" href="/static/style.css?v=14" />
+  <link rel="stylesheet" href="/static/style.css?v=15" />
 </head>
 <body>
 <header>
@@ -301,7 +301,7 @@
         <div class="wide subhead">마커 이동 <small class="muted">(어디로 언제 움직일지는 ③ 이동 지점에서 정합니다)</small></div>
         <label title="층 이동과 순간이동 방식의 이동에서 마커가 사라졌다 나타나는 데 걸리는 시간">순간이동 시간 <span class="val" id="fadeVal"></span>
           <input type="range" min="0.2" max="2" step="0.1" data-setting="fade_sec" /></label>
-        <label title="층별 노출 시작·종료 시각에서 도면이 스르륵 나타나고 사라지는 시간 (도면 위 층 탭 아래에서 시각을 정합니다)">도면 스르륵 시간 <span class="val" id="panelFadeVal"></span>
+        <label title="층별 노출 구간의 시작·종료 시각에서 도면이 스르륵 나타나고 사라지는 시간 (도면 위 층 탭 아래에서 구간을 정합니다)">도면 스르륵 시간 <span class="val" id="panelFadeVal"></span>
           <input type="range" min="0" max="3" step="0.1" data-setting="panel_fade_sec" /></label>
         <label>위치<select data-setting="corner">
           <option value="br">우측 하단</option><option value="bl">좌측 하단</option>
@@ -331,6 +331,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=37"></script>
+<script src="/static/app.js?v=38"></script>
 </body>
 </html>

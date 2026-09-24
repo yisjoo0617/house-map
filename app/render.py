@@ -736,11 +736,20 @@ def _png_data_url(bgra: np.ndarray) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode()
 
 
-def show_windows(floors: list[dict]) -> list[tuple[float | None, float | None]]:
-    """Per floor (show_start, show_end) in seconds; None = from the video start / to its end."""
+def show_windows(floors: list[dict]) -> list[list[tuple[float | None, float | None]]]:
+    """Per floor its show windows [(start, end), ...] in seconds; None = from the video start / to its end.
+    Reads the current "shows" list and, for older files, the single show_start / show_end pair."""
     def num(v):
         return None if v in (None, "") else float(v)
-    return [(num(f.get("show_start")), num(f.get("show_end"))) for f in floors]
+
+    out = []
+    for f in floors:
+        if "shows" in f:
+            out.append([(num(w.get("start")), num(w.get("end"))) for w in f["shows"] or []])
+        else:
+            s0, e0 = num(f.get("show_start")), num(f.get("show_end"))
+            out.append([] if s0 is None and e0 is None else [(s0, e0)])
+    return out
 
 
 def rooms_by_floor(rooms: list[dict], floor_ids: list[str]) -> list[list[dict]]:
