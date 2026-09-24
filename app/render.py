@@ -5,6 +5,7 @@ import base64
 import math
 import shutil
 import subprocess
+import uuid
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable
@@ -100,6 +101,10 @@ def decode_plan(img: np.ndarray | None) -> np.ndarray:
     """Plan as BGR, flattening any transparency onto white."""
     if img is None:
         raise RuntimeError("도면 이미지를 열 수 없습니다")
+    if img.dtype == np.uint16:   # 16-bit PNG (scanners, Photoshop): everything downstream expects 8-bit
+        img = (img >> 8).astype(np.uint8)
+    elif img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
     if img.ndim == 2:
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if img.shape[2] == 4:
@@ -427,6 +432,8 @@ def auto_crop(plan: np.ndarray, settings: dict, edits: list[dict]) -> tuple:
         return (0, 0, pw, ph)
     x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
     x1 = max(b[2] for b in boxes); y1 = max(b[3] for b in boxes)
+    if x1 - x0 < 2 or y1 - y0 < 2:   # all that is left is a point (a box shrunk to nothing): the whole plan, not a zero-size crop
+        return (0, 0, pw, ph)
     m = 0.04 * max(x1 - x0, y1 - y0)
     return (max(0, x0 - m), max(0, y0 - m), min(pw, x1 + m), min(ph, y1 + m))
 
@@ -835,9 +842,12 @@ def render_outputs(
         clean = {**settings, "style": "chalk", "panel_color": "#ffffff", "panel_opacity": 1.0, "opacity": 1.0,
                  "line_color": "#2b2b2b", "chalk_texture": False, "show_note": False}
         mm_clean = Minimap(plans, labels, clean, title, 1600, 10_000, per_floor, edits)
+        slugs = [safe_label(lab, i) for i, lab in enumerate(labels)]
+        low = [x.lower() for x in slugs]   # "1F" / "1 F" (or "1f" on Windows) must not overwrite each other
+        slugs = [x if low.count(x.lower()) == 1 else f"{x}_{i + 1}" for i, x in enumerate(slugs)]
         for i, lab in enumerate(labels):
             for prefix, m in (("minimap", mm_hi), ("plan", mm_clean)):
-                name = f"{prefix}_{safe_label(lab, i)}.png"
+                name = f"{prefix}_{slugs[i]}.png"
                 imwrite(out_dir / name, m.rgba(i))
                 produced.append(name)
 
@@ -880,7 +890,7 @@ def render_outputs(
 def _render_overlay(mm, keys, fps, total, W, H, codec_args, out_dir, out_path, log_path, progress) -> None:
     """The marker rests most of the time, so render each distinct frame once as a PNG
     and let FFmpeg hold it for as long as it lasts (concat demuxer with durations)."""
-    work = out_dir / "_frames"
+    work = out_dir / f"_frames_{uuid.uuid4().hex[:8]}"   # its own folder: two renders must not wipe each other's frames
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     try:
@@ -944,7 +954,10 @@ def _render_composite(mm, keys, video_path, fps, total, W, H, out_path, log_path
                 last, last_key = mm.draw(*k), k
             f = np.ascontiguousarray(frame[:H, :W])
             mm.composite(f, *last)
-            proc.stdin.write(f.tobytes())
+            try:
+                proc.stdin.write(f.tobytes())
+            except BrokenPipeError:   # ffmpeg died first: its log has the reason
+                raise RuntimeError("composite.mp4 인코딩 실패 (ffmpeg.log 확인)")
             i += 1
             if progress and i % 15 == 0:
                 progress(min(0.99, i / total), f"합성 {i}/{total} 프레임")

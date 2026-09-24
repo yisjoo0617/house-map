@@ -36,6 +36,8 @@ app = FastAPI(title="House-Map")
 executor = ThreadPoolExecutor(max_workers=2)
 jobs: dict[str, dict] = {}
 _lock = threading.Lock()
+_proj_lock = threading.Lock()   # every load -> change -> save of a project.json runs under it: the client sends
+                                # rooms/path, floors and settings as separate requests that must not interleave
 
 OUTPUT_EXTS = (".mp4", ".mov", ".png")
 
@@ -57,7 +59,14 @@ def save_project(pid: str, proj: dict) -> None:
     path = pdir(pid) / "project.json"
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(proj, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(path)
+    for attempt in range(20):   # Windows refuses the swap while another request is still reading the file
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 def load_analysis(pid: str) -> dict | None:
@@ -140,8 +149,10 @@ def start_job(pid: str, kind: str, fn) -> str:
     def run() -> None:
         job["status"] = "running"
         try:
-            job["result"] = fn(update)
-            job["status"], job["progress"] = "done", 1.0
+            result = fn(update)
+            with _lock:   # a new key must not appear while job_status is serialising the dict
+                job["result"] = result
+                job["status"], job["progress"] = "done", 1.0
         except Exception as e:  # surface to the UI
             job["status"], job["message"] = "error", str(e)
 
@@ -331,6 +342,11 @@ def upgrade_project(proj: dict) -> dict:
 
 @app.put("/api/projects/{pid}")
 def update_project(pid: str, body: ProjectUpdate):
+    with _proj_lock:
+        return _update_project(pid, body)
+
+
+def _update_project(pid: str, body: ProjectUpdate):
     proj = load_project(pid)
     if body.name is not None:
         proj["name"] = body.name
@@ -407,7 +423,7 @@ def clean_edits(edits) -> list[dict]:
                     item["steps"] = int(e["steps"])
                 out.append(item)
             elif t == "erase":
-                out.append({"type": t, "pts": [pt(v) for v in e["pts"]][:2000], "r": round(float(e.get("r", 6)), 1)})
+                out.append({"type": t, "pts": [pt(v) for v in e["pts"]][:10000], "r": round(float(e.get("r", 6)), 1)})
             else:
                 continue
             if t != "erase" and e.get("thin"):
@@ -455,15 +471,26 @@ def redetect_floor(pid: str, fid: str, body: AutoBody):
         raise HTTPException(404, "층이 없습니다")
     s = merged_settings(proj.get("settings"))
     kinds = tuple(k for k in body.kinds if k in AUTO_KINDS) if body.kinds is not None else auto_kinds(s)
-    # automatic items go first so the eraser strokes that follow still wipe them (edits are layered in order)
-    manual = [e for e in fl.get("edits", []) if not e.get("auto")]
-    fl["edits"] = (detect_edits(load_plan(d / fl["file"]), s, kinds) if kinds else []) + manual
-    save_project(pid, proj)
+    detected = detect_edits(load_plan(d / fl["file"]), s, kinds) if kinds else []   # slow: done before taking the lock
+    with _proj_lock:   # re-read, so hand-drawn items saved while detection ran are kept
+        proj = load_project(pid)
+        fl = next((f for f in proj["floors"] if f["id"] == fid), None)
+        if not fl:
+            raise HTTPException(404, "층이 없습니다")
+        # automatic items go first so the eraser strokes that follow still wipe them (edits are layered in order)
+        manual = [e for e in fl.get("edits", []) if not e.get("auto")]
+        fl["edits"] = detected + manual
+        save_project(pid, proj)
     return public_project(pid)
 
 
 @app.post("/api/projects/{pid}/floors")
 def add_floor(pid: str, plan: UploadFile = File(...), label: str = Form("")):
+    with _proj_lock:
+        return _add_floor(pid, plan, label)
+
+
+def _add_floor(pid: str, plan: UploadFile, label: str):
     d = pdir(pid)
     proj = load_project(pid)
     n = 1 + max((int(f["id"][1:]) for f in proj["floors"]), default=0)
@@ -476,6 +503,11 @@ def add_floor(pid: str, plan: UploadFile = File(...), label: str = Form("")):
 
 @app.delete("/api/projects/{pid}/floors/{fid}")
 def delete_floor(pid: str, fid: str):
+    with _proj_lock:
+        return _delete_floor(pid, fid)
+
+
+def _delete_floor(pid: str, fid: str):
     d = pdir(pid)
     proj = load_project(pid)
     fl = next((f for f in proj["floors"] if f["id"] == fid), None)
@@ -486,7 +518,17 @@ def delete_floor(pid: str, fid: str):
     proj["floors"].remove(fl)
     gone = {r["id"] for r in proj["rooms"] if r["floor"] == fid}
     proj["rooms"] = [r for r in proj["rooms"] if r["id"] not in gone]
-    proj["path"] = [q for q in proj.get("path", []) if q["floor"] != fid]
+    # the points on this floor go; a point that followed one of them now starts its leg elsewhere, so its bends go too
+    kept, after_gone = [], False
+    for q in proj.get("path", []):
+        if q["floor"] == fid:
+            after_gone = True
+            continue
+        if after_gone:
+            q.pop("via", None)
+            after_gone = False
+        kept.append(q)
+    proj["path"] = kept
     (d / fl["file"]).unlink(missing_ok=True)
     save_project(pid, proj)
     return public_project(pid)
@@ -494,7 +536,13 @@ def delete_floor(pid: str, fid: str):
 
 @app.delete("/api/projects/{pid}")
 def delete_project(pid: str):
-    shutil.rmtree(pdir(pid))
+    d = pdir(pid)
+    with _lock:   # ffmpeg still holds files of a running job (Windows cannot delete those: a half-removed folder would remain)
+        busy = [j["kind"] for j in jobs.values() if j["project"] == pid and j["status"] in ("queued", "running")]
+    if busy:
+        names = {"preview": "미리보기 변환", "analyze": "분석", "render": "렌더링"}
+        raise HTTPException(409, f"{names.get(busy[0], busy[0])}이 진행 중입니다. 끝난 뒤 삭제해 주세요")
+    shutil.rmtree(d)
     return {"ok": True}
 
 
@@ -569,6 +617,10 @@ def render(pid: str, body: RenderRequest):
         raise HTTPException(400, "출력 형식을 선택해주세요")
     if any(o in outputs for o in ("composite", "overlay")) and not proj.get("path"):
         raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 마커가 지나갈 지점을 먼저 찍어주세요")
+    with _lock:   # a render of this project is already running (the page was reloaded meanwhile): follow that one
+        running = next((j for j in jobs.values() if j["project"] == pid and j["kind"] == "render" and j["status"] in ("queued", "running")), None)
+    if running:
+        return {"job": running["id"]}
 
     def run(update):
         files = render_outputs(
@@ -607,7 +659,7 @@ def save_preset(body: PresetBody):
     return presets
 
 
-@app.delete("/api/presets/{name}")
+@app.delete("/api/presets/{name:path}")   # a name with "/" in it arrives decoded, so it must match the whole rest of the path
 def delete_preset(name: str):
     presets = load_presets()
     presets.pop(name, None)
@@ -617,10 +669,11 @@ def delete_preset(name: str):
 
 @app.get("/api/jobs/{jid}")
 def job_status(jid: str):
-    job = jobs.get(jid)
-    if not job:
-        raise HTTPException(404, "작업이 없습니다")
-    return job
+    with _lock:   # a snapshot: the worker thread may be adding "result" to it right now
+        job = jobs.get(jid)
+        if not job:
+            raise HTTPException(404, "작업이 없습니다")
+        return dict(job)
 
 
 @app.get("/api/projects/{pid}/files/{name:path}")

@@ -149,6 +149,12 @@ $("#projectGrid").addEventListener("click", (e) => {
 // ---------------- dialogs: new / rename / delete ----------------
 
 for (const b of $$("[data-close]")) b.addEventListener("click", () => b.closest("dialog").close());
+// while a project uploads, neither 만들기 nor 취소 can be pressed (Esc is blocked below): cancelling would only hide
+// the dialog while the upload carries on and then yank the user into the new project
+function setUploading(on) {
+  $("#createBtn").disabled = on;
+  for (const b of $$("#newDialog [data-close]")) b.disabled = on;
+}
 $("#newBtn").addEventListener("click", openNew);
 for (const b of $$("[data-open-new]")) b.addEventListener("click", openNew);
 
@@ -173,7 +179,7 @@ $("#newForm").addEventListener("submit", (e) => {
   const prog = $("#uploadProg"), msg = $("#uploadMsg"), err = $("#newError");
   $("#uploadBox").classList.remove("hidden");
   err.textContent = "";
-  $("#createBtn").disabled = true;
+  setUploading(true);
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/projects");
   xhr.upload.onprogress = (ev) => {
@@ -181,7 +187,7 @@ $("#newForm").addEventListener("submit", (e) => {
     msg.textContent = prog.value < 1 ? `업로드 ${Math.round(prog.value * 100)}%` : "영상 확인 중…";
   };
   xhr.onload = () => {
-    $("#createBtn").disabled = false;
+    setUploading(false);
     $("#uploadBox").classList.add("hidden");
     if (xhr.status !== 200) {
       err.textContent = "실패: " + (safeJson(xhr.responseText)?.detail || xhr.statusText);
@@ -193,7 +199,7 @@ $("#newForm").addEventListener("submit", (e) => {
     // swap to the browser-friendly proxy once it is ready
     pollJob(proj.preview_job).then(() => state.proj?.id === proj.id && setVideoSource("preview.mp4")).catch(() => {});
   };
-  xhr.onerror = () => { $("#createBtn").disabled = false; err.textContent = "업로드 실패: 서버가 실행 중인지 확인하세요"; };
+  xhr.onerror = () => { setUploading(false); err.textContent = "업로드 실패: 서버가 실행 중인지 확인하세요"; };
   msg.textContent = "업로드 중…";
   xhr.send(fd);
 });
@@ -235,7 +241,8 @@ function openDelete(p) {
 
 $("#deleteForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  await api(`/api/projects/${deleteId}`, { method: "DELETE" });
+  try { await api(`/api/projects/${deleteId}`, { method: "DELETE" }); }
+  catch (err) { alert("삭제할 수 없습니다: " + err.message); return; }
   $("#deleteDialog").close();
   if (state.proj?.id === deleteId) location.hash = "";
   else refreshProjectList();
@@ -248,12 +255,26 @@ function showCrumb() {
 }
 
 async function openProject(id) {
-  if (state.proj && state.proj.id !== id) await flushSaves().catch(() => {});
+  if (state.proj && state.proj.id !== id) {
+    await flushSaves().catch(() => {});
+    video.pause();
+    video.removeAttribute("src");   // the playhead of the previous project must not carry over
+    video.load();
+  }
   const proj = await api(`/api/projects/${id}`);
   state.viewFloor = null;
   state.undo = [];
   state.structImgs = {};
   state.active = null;
+  // nothing of the previous project may linger: its bend-undo stack, track, minimap panels, drags and clip stop
+  state.routeUndo = [];
+  $("#routeUndoBtn").disabled = true;
+  state.track = null;
+  state.mini = null;
+  state.tlDrag = null;
+  state.drag = null;
+  clipStop = null;
+  lastMoveKey = "";
   applyProject(proj);
   state.analysis = proj.has_analysis ? await api(`/api/projects/${id}/analysis`) : null;
   $("#listView").classList.add("hidden");
@@ -375,9 +396,16 @@ $("#floorShow").addEventListener("change", (e) => {
   const inp = e.target.closest("[data-show]");
   if (!inp) return;
   const [i, key] = inp.dataset.show.split(":");
-  const w = floorShows(floorOf(state.viewFloor))[+i];
+  const f = floorOf(state.viewFloor);
+  const w = floorShows(f)[+i];
   if (!w) return;
-  w[key] = parseTime(inp.value);
+  const v = parseTime(inp.value);
+  if (v == null && inp.value.trim()) { flash("시각은 분:초 또는 초로 적어 주세요 (예: 1:23.5)"); renderFloorShow(); return; }
+  w[key] = v;
+  if (w.start == null && w.end == null) {   // both edges blank = no window at all (that is how the server reads it too)
+    floorShows(f).splice(+i, 1);
+    flash("시작·종료가 모두 비어 구간을 지웠습니다 · 영상 내내 보이게 하려면 시작에 0을 넣으세요");
+  }
   renderFloorShow();
   saveEdits();
 });
@@ -418,6 +446,9 @@ $("#floorTabs").addEventListener("click", async (e) => {
     if (!confirm(`${f.label} 도면과 그 층의 방·기록을 삭제할까요?`)) return;
     await flushSaves();
     applyProject(await api(`/api/projects/${state.proj.id}/floors/${f.id}`, { method: "DELETE" }));
+    state.undo = state.undo.filter((u) => u.fid !== f.id);   // Ctrl+Z must never write this floor's drawing onto a later floor with the same id
+    delete state.structImgs[f.id];
+    if (state.selectedEdit) state.selectedEdit = null;
     state.viewFloor = state.proj.floors[0].id;
     renderFloorTabs();
     await Promise.all([loadPlanImages(), refreshMinimap(), refreshTrack()]);
@@ -433,6 +464,7 @@ function renameFloor(fid) {
   f.label = label.trim();
   renderFloorTabs();
   renderRooms();
+  renderMoves();
   api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ floors: state.proj.floors }) }).then(refreshMinimap);
 }
 
@@ -454,6 +486,7 @@ $("#addFloorFile").addEventListener("change", async (e) => {
   renderFloorTabs();
   await Promise.all([loadPlanImages(), refreshMinimap()]);
   resizeAll();
+  if (state.mode === "draw") loadStruct();
   e.target.value = "";
 });
 
@@ -493,26 +526,32 @@ for (const el of $$("[data-setting]")) {
   });
 }
 
-let settingsTimer;
+let settingsTimer, settingsRetrack = false;
 function saveSettings(retrack) {
+  settingsRetrack ||= retrack;   // several quick changes share one save: retrack if any of them needs it
   clearTimeout(settingsTimer);
   settingsTimer = setTimeout(async () => {
     settingsTimer = null;
+    const needTrack = settingsRetrack;
+    settingsRetrack = false;
     await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ settings: state.proj.settings }) });
     await refreshMinimap();
-    if (retrack) await refreshTrack();
+    if (needTrack) await refreshTrack();
     if (state.mode === "draw") loadStruct();
   }, 350);
 }
 
+let miniSeq = 0;
 async function refreshMinimap() {
-  const m = await api(`/api/projects/${state.proj.id}/minimap`);
+  const seq = ++miniSeq, pid = state.proj.id;
+  const m = await api(`/api/projects/${pid}/minimap`);
   const [floorImgs, shadow, glow, body] = await Promise.all([
     Promise.all(m.floors.map((f) => loadImage(f.image))),
     loadImage(m.marker.images.shadow),
     loadImage(m.marker.images.glow),
     loadImage(m.marker.images.body),
   ]);
+  if (seq !== miniSeq || state.proj?.id !== pid) return;   // a newer request is in flight, or the project was left
   m.floors.forEach((f, i) => (f.img = floorImgs[i]));
   m.marker.layers = { shadow, glow, body };
   m.marker.canvas = document.createElement("canvas");
@@ -569,7 +608,10 @@ function saveRoomsMoves() {
 
 async function doSave() {
   saveTimer = null;
-  await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, path: state.path }) });
+  if (!state.proj) return;
+  const pid = state.proj.id;
+  await api(`/api/projects/${pid}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, path: state.path }) });
+  if (state.proj?.id !== pid) return;   // the project was closed while the save was in flight
   await Promise.all([refreshTrack(), refreshMinimap()]);
 }
 
@@ -649,6 +691,18 @@ function pushRouteUndo() {
   $("#routeUndoBtn").disabled = false;
 }
 
+// drop the snapshot just pushed (the gesture turned out to be a plain click)
+function popRouteUndo() {
+  state.routeUndo.pop();
+  $("#routeUndoBtn").disabled = !state.routeUndo.length;
+}
+
+// the leg into this point was reshaped (a point inserted before it or deleted): its old bends must not come back
+function forgetRouteUndo(id) {
+  state.routeUndo = state.routeUndo.map((snap) => snap.filter(([q]) => q !== id)).filter((snap) => snap.length);
+  $("#routeUndoBtn").disabled = !state.routeUndo.length;
+}
+
 function undoRoute() {
   const last = state.routeUndo.pop();
   $("#routeUndoBtn").disabled = !state.routeUndo.length;
@@ -678,7 +732,7 @@ function updatePlanHint() {
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
-        ? "⌂ 첫 지점 · ● 지나는 지점 · 빈 곳 클릭 = 경로 끝에 지점 추가 (방 점을 클릭하면 그 위치) · 선 근처 클릭 = 그 사이에 지점 끼워 넣기 · 지점 클릭 = 선택 (시작·종료 시간 칸이 열리고 종료 칸이 먼저 선택됨, ⏺ 현재로 기록) · 드래그 = 옮기기 (앞뒤 이동이 함께 따라옵니다) · 더블클릭 = 그 시각으로 · 우클릭/Del = 지점 삭제"
+        ? "⌂ 첫 지점 · ● 지나는 지점 · 빈 곳 클릭 = 경로 끝에 지점 추가 (방 점을 클릭하면 그 위치) · 선 근처 클릭 = 그 사이에 지점 끼워 넣기 · 지점 클릭 = 선택 (시작·종료 시간 칸이 열리고 종료 칸이 먼저 선택됨, 첫 지점은 이동 시작 칸 하나, ⏺ 현재로 기록) · 드래그 = 옮기기 (앞뒤 이동이 함께 따라옵니다) · 더블클릭 = 그 시각으로 · 우클릭 또는 ✕ 지점 삭제 = 지점 삭제 (Del은 시간 칸에 커서가 없을 때)"
         : "빈 곳 클릭 = 그 자리에 방 이름 표시 (선이 없는 깨끗한 곳을 고르세요) · 드래그 = 위치 수정 · 우클릭 = 삭제 · 마커 이동은 ③ 이동 지점에서";
 }
 
@@ -754,7 +808,7 @@ planCv.addEventListener("pointerdown", (e) => {
       return;
     }
     const leg = hitLeg(p);
-    if (leg) insertPoint(p, leg.k); else appendPoint(p);
+    if (leg) insertPoint(p, leg.k, leg.seg); else appendPoint(p);
     return;
   }
   if (state.mode === "route") {
@@ -767,7 +821,7 @@ planCv.addEventListener("pointerdown", (e) => {
     }
     if (hitPathPoint(p)) return;   // a path point is never a bend
     pushRouteUndo();
-    if (insertVia(p)) saveRoomsMoves(); else state.routeUndo.pop();
+    if (insertVia(p)) saveRoomsMoves(); else popRouteUndo();
     return;
   }
   const hit = hitRoom(p);
@@ -818,6 +872,7 @@ function addRoom(name, p) {
 }
 
 planCv.addEventListener("pointermove", (e) => {
+  if (!viewImg()) return;   // the plan image is still loading (right after 층 추가)
   if (state.mode === "draw") return drawMove(e);
   const d = state.drag;
   if (!d) {
@@ -841,7 +896,7 @@ planCv.addEventListener("pointerup", (e) => {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
-  if (d.via != null) { if (d.moved) saveRoomsMoves(); else state.routeUndo.pop(); return; }
+  if (d.via != null) { if (d.moved) saveRoomsMoves(); else popRouteUndo(); return; }
   if (d.moved) saveRoomsMoves();   // a plain click on a room / point only selects it
   else if (d.pt) focusActiveBox();   // ...and puts the cursor in the selected time box (종료) beside the point
 });
@@ -858,7 +913,7 @@ planCv.addEventListener("pointerleave", () => { state.hover = null; if (state.mo
 
 planCv.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (state.mode === "draw") return;
+  if (state.mode === "draw" || !viewImg()) return;
   if (state.mode === "moves") {
     const pt = hitPathPoint(planPoint(e));
     if (pt) deletePoint(pt);
@@ -892,6 +947,9 @@ const ptById = (id) => state.path.find((q) => q.id === id);
 const ptIndex = (pt) => state.path.indexOf(pt);
 const nowT = () => +video.currentTime.toFixed(2);
 const FIELD_LABEL = { arrive: "시작", depart: "종료" };   // 시작 = when the marker reaches the point, 종료 = when it leaves
+// the first point has no arrival (the marker is there from the video start), so its one time is shown as
+// "이동 시작": to the user it is when the walk begins, not the end of anything
+const fieldLabel = (pt, field) => (field === "depart" && ptIndex(pt) === 0 ? "이동 시작" : FIELD_LABEL[field]);
 
 // which time boxes a point has: the first point only departs, every other point arrives and departs
 const ptFields = (pt) => (ptIndex(pt) === 0 ? ["depart"] : ["arrive", "depart"]);
@@ -935,7 +993,7 @@ function refreshActiveMarks() {
     inp.classList.toggle("active", !!ap && ap.pt.id === id && ap.field === field);
   }
   $("#moveSel").innerHTML = ap
-    ? `선택: <b>${ptName(ap.pt)} · ${FIELD_LABEL[ap.field]}</b> ${ap.pt[ap.field] != null ? fmtTime(ap.pt[ap.field]) : "(비어 있음)"} · ⏺ 현재를 누르면 지금 재생 시각이 들어갑니다`
+    ? `선택: <b>${ptName(ap.pt)} · ${fieldLabel(ap.pt, ap.field)}</b> ${ap.pt[ap.field] != null ? fmtTime(ap.pt[ap.field]) : "(비어 있음)"} · ⏺ 현재를 누르면 지금 재생 시각이 들어갑니다`
     : "지점을 클릭해서 선택하세요";
 }
 
@@ -962,7 +1020,7 @@ function hitLeg(p) {
     const poly = canBend(l) ? routePoly(l) : [[l.a.x, l.a.y], [l.b.x, l.b.y]];
     for (let i = 0; i < poly.length - 1; i++) {
       const d = segDist(p, poly[i], poly[i + 1]);
-      if (d < bd) { bd = d; best = l; }
+      if (d < bd) { bd = d; best = l; best.seg = i; }
     }
   }
   return best;
@@ -981,7 +1039,7 @@ const newPoint = (p) => ({ id: "p" + Math.random().toString(36).slice(2, 8), ...
 // "click the spot on arrival, scrub, ⏺ 현재 on leaving, click the next spot" is the whole rhythm.
 function appendPoint(p) {
   const pt = newPoint(p);
-  if (!state.path.length) { pt.depart = nowT(); flash(`⌂ 첫 지점 · 종료 ${fmtTime(pt.depart)} (떠나는 순간에 ⏺ 현재)`); }
+  if (!state.path.length) { pt.depart = nowT(); flash(`⌂ 첫 지점 · 이동 시작 ${fmtTime(pt.depart)} (걷기 시작하는 순간에 ⏺ 현재)`); }
   else { pt.arrive = nowT(); flash(`지점 ${state.path.length} · 시작 ${fmtTime(pt.arrive)} · 떠나는 순간에 ⏺ 현재`); }
   state.path.push(pt);
   state.active = { id: pt.id, field: "depart" };
@@ -989,11 +1047,20 @@ function appendPoint(p) {
 }
 
 // click on a leg: a point in between (arrives now, leaves right away until you set it)
-function insertPoint(p, k) {
+function insertPoint(p, k, seg = 0) {
   const pt = newPoint(p);
   pt.arrive = nowT();
+  const next = state.path[k], prev = state.path[k - 1];
   state.path.splice(k, 0, pt);
-  delete state.path[k + 1].via;   // the leg after it changed shape: its old bends no longer fit
+  // the bends of the leg that was split stay where they are: the ones before the clicked piece now belong to the
+  // leg into the new point, the rest to the leg out of it (a leg that could not be bent just loses its stale bends)
+  const via = next.via || [];
+  if (via.length && prev.floor === next.floor && next.mode !== "jump" && pt.floor === next.floor) {
+    const head = via.slice(0, seg), tail = via.slice(seg);
+    if (head.length) pt.via = head;
+    if (tail.length) next.via = tail; else delete next.via;
+  } else delete next.via;
+  forgetRouteUndo(next.id);   // old snapshots hold the whole bend list for a leg that no longer exists
   state.active = { id: pt.id, field: "depart" };
   saveRoomsMoves();
   flash(`지점 ${k} 끼워 넣음 · 시작 ${fmtTime(pt.arrive)}`);
@@ -1004,7 +1071,7 @@ function stampActive() {
   const ap = activePoint();
   if (!ap) { flash("먼저 도면이나 표에서 지점을 클릭해 선택하세요"); return; }
   ap.pt[ap.field] = nowT();
-  flash(`${ptName(ap.pt)} ${FIELD_LABEL[ap.field]} → ${fmtTime(nowT())}`);
+  flash(`${ptName(ap.pt)} ${fieldLabel(ap.pt, ap.field)} → ${fmtTime(nowT())}`);
   if (ap.field === "arrive") state.active = { id: ap.pt.id, field: "depart" };
   saveRoomsMoves();
 }
@@ -1015,6 +1082,7 @@ function deletePoint(pt) {
   state.path.splice(i, 1);
   if (i < state.path.length && i > 0) delete state.path[i].via;   // the leg that now reaches the next point is new
   if (state.path.length && i === 0) delete state.path[0].via;
+  if (i < state.path.length) forgetRouteUndo(state.path[i].id);
   if (state.active?.id === pt.id) state.active = null;
   saveRoomsMoves();
   flash("지점 삭제");
@@ -1047,7 +1115,7 @@ function legInfo(pt) {
 // how long the marker rests here
 function stayInfo(pt) {
   const k = ptIndex(pt), last = k === state.path.length - 1;
-  if (pt.depart == null) return last ? "" : `<span class="warn">⚠ 종료 시각 없음 (시작하자마자 떠남)</span>`;
+  if (pt.depart == null) return last ? "" : k === 0 ? `<span class="warn">⚠ 이동 시작 시각 없음 (영상 처음부터 바로 떠남)</span>` : `<span class="warn">⚠ 종료 시각 없음 (시작하자마자 떠남)</span>`;
   if (k === 0) return "";
   if (pt.arrive == null) return "";
   if (pt.depart < pt.arrive) return `<span class="warn">⚠ 종료가 시작보다 앞</span>`;
@@ -1060,19 +1128,20 @@ function renderMoves() {
   const cur = state.track?.moves?.find((m) => m.end > m.start && now >= m.start && now <= m.end)?.id;
   const fl = (q) => escapeHtml(floorOf(q.floor)?.label || "");
   const box = (pt, field) => `<input class="mvtime ${isActiveField(pt, field) ? "active" : ""}" data-pt-time="${pt.id}:${field}" value="${pt[field] == null ? "" : fmtTime(pt[field])}" placeholder="분:초"
-      title="${FIELD_LABEL[field]} 시각 (분:초 또는 초). 클릭하면 이 칸이 선택되어 ⏺ 현재로 시각을 넣을 수 있습니다" />`;
+      title="${fieldLabel(pt, field)} 시각 (분:초 또는 초). 클릭하면 이 칸이 선택되어 ⏺ 현재로 시각을 넣을 수 있습니다" />`;
   $("#mvTable tbody").innerHTML = state.path.map((pt, i) => {
     const last = i === state.path.length - 1;
     return `
     <tr data-pt="${pt.id}" class="${isActivePoint(pt) ? "active" : ""} ${cur === pt.id ? "now" : ""}">
       <td><a href="#" data-pt-seek="${pt.id}" title="이 지점의 시각으로 이동">${i === 0 ? "⌂" : i}</a><div class="mv">${fl(pt)}</div></td>
       <td>${i === 0 ? `<span class="muted">영상 처음</span>` : box(pt, "arrive")}</td>
-      <td>${box(pt, "depart")}<div class="mv">${last && pt.depart == null ? `<span class="muted">다음 지점을 찍으면 씀</span>` : stayInfo(pt)}</div></td>
+      <td>${i === 0 ? `<span class="muted">이동 시작</span> ` : ""}${box(pt, "depart")}<div class="mv">${last && pt.depart == null ? `<span class="muted">다음 지점을 찍으면 씀</span>` : stayInfo(pt)}</div></td>
       <td>${i > 0 && state.path[i - 1].floor === pt.floor ? `<select data-pt-mode="${pt.id}" class="mvmode" title="걸어서: 앞 지점에서 직선으로 걷습니다 (④ 경로 꺾기로 꺾을 수 있음) · 순간이동: 앞 지점에서 사라졌다 여기서 나타납니다 (영상이 컷으로 넘어갈 때)">
           <option value="walk" ${pt.mode !== "jump" ? "selected" : ""}>걸어서</option><option value="jump" ${pt.mode === "jump" ? "selected" : ""}>순간이동</option></select>` : ""}${legInfo(pt)}</td>
       <td>${i > 0 ? `<button data-pt-play="${pt.id}" title="앞 지점에서 여기까지의 이동만 재생해서 확인 (앞뒤 1초)">▶ 확인</button>` : ""}</td>
       <td><button data-pt-del="${pt.id}" title="이 지점 삭제 (앞뒤 지점이 바로 이어집니다)">✕</button></td>
     </tr>`; }).join("") || `<tr><td colspan="6" class="muted">③ 이동 지점 모드에서 도면을 클릭해 마커가 지나갈 지점을 차례로 찍으세요</td></tr>`;
+  refreshActiveMarks();   // the "선택: …" line and the highlighted boxes follow a newly added point or a stamped time too
 }
 
 $("#mvTable").addEventListener("click", (e) => {
@@ -1117,7 +1186,13 @@ function bindTimeInputs(root) {
     const [id, field] = inp.dataset.ptTime.split(":");
     const pt = ptById(id);
     if (!pt) return;
-    pt[field] = parseTime(inp.value);
+    const v = parseTime(inp.value);
+    if (v == null && inp.value.trim()) {   // not a time: keep what was there and say so
+      flash("시각은 분:초 또는 초로 적어 주세요 (예: 1:23.5)");
+      inp.value = pt[field] == null ? "" : fmtTime(pt[field]);
+      return;
+    }
+    pt[field] = v;
     saveRoomsMoves();
   });
   root.addEventListener("keydown", (e) => {
@@ -1134,6 +1209,7 @@ function showFloor(fid) {
   renderFloorTabs();
   resizePlan();
   drawPlan();
+  if (state.mode === "draw") loadStruct();
 }
 
 // The time boxes beside the selected point on the plan (시작 / 종료). The element is kept and only moved /
@@ -1152,7 +1228,7 @@ function syncPointLabels() {
     el.dataset.pt = pt.id;
     el.dataset.fields = fields.join(",");
     el.innerHTML = `<b class="ptname"></b>` + fields.map((f) =>
-      `<label><span class="tag">${FIELD_LABEL[f]}</span><input data-pt-time="${pt.id}:${f}" placeholder="분:초" title="${FIELD_LABEL[f]} 시각 (분:초 또는 초) · Enter로 적용" /></label>`).join("");
+      `<label><span class="tag">${fieldLabel(pt, f)}</span><input data-pt-time="${pt.id}:${f}" placeholder="분:초" title="${fieldLabel(pt, f)} 시각 (분:초 또는 초) · Enter로 적용" /></label>`).join("");
     box.appendChild(el);
   }
   // right of the point, or left of it when that would run past the plan's edge
@@ -1295,7 +1371,7 @@ async function redetect(clear) {
   if (!state.proj) return;
   const f = floorOf(state.viewFloor);
   const n = (f.edits || []).filter((e) => e.auto).length;
-  if (clear && n && !confirm(`${f.label}의 자동 인식 항목 ${n}개를 지울까요? 직접 그린 것과 지우개 자국은 남습니다.`)) return;
+  if (clear && n && !confirm(`${f.label}의 자동 인식 항목 ${n}개를 지울까요? 직접 그리거나 옮긴 것과 지우개 자국은 남습니다.`)) return;
   const s = state.proj.settings;
   const kinds = clear ? [] : ["walls", "thin", "doors", "stairs"].filter((k) => s["auto_" + k]);
   if (!clear && !kinds.length) { flash("인식할 항목을 하나 이상 선택하세요"); return; }
@@ -1322,9 +1398,15 @@ function pushUndo() {
 }
 
 function undoEdit() {
-  const last = state.undo.pop();
+  let last;
+  while ((last = state.undo.pop()) && !floorOf(last.fid));   // entries of a deleted floor are skipped
   if (!last) return;
   floorOf(last.fid).edits = JSON.parse(last.edits);
+  if (last.fid !== state.viewFloor) {   // the change being undone is on another floor: show it, or it looks like nothing happened
+    state.selectedEdit = null;
+    showFloor(last.fid);
+    flash(`${floorOf(last.fid).label} 되돌리기`);
+  }
   saveEdits(true);
 }
 
@@ -1653,7 +1735,10 @@ function drawMove(e) {
     drawPlan();
     return;
   }
-  if (d.type === "erase") d.pts.push([p.x, p.y]);
+  if (d.type === "erase") {
+    const q = d.pts[d.pts.length - 1];
+    if (Math.hypot(p.x - q[0], p.y - q[1]) >= Math.max(1, d.r / 3)) d.pts.push([p.x, p.y]);   // the stroke is 2r wide: closer points change nothing
+  }
   else if (d.type === "line" || d.type === "thinline") [d.start, d.end] = clipToWalls(d.start0, snapPoint(p, d.start0, e.altKey));
   else if (d.type !== "flip") d.end = p;
   drawPlan();
@@ -1665,13 +1750,13 @@ function drawUp() {
   if (!d) return;
   if (d.type === "resize") {
     state.selectedEdit = d.target;
-    if (d.moved) saveEdits();
+    if (d.moved) { delete d.target.auto; saveEdits(); }
     else { state.undo.pop(); drawPlan(); }
     return;
   }
   if (d.type === "move") {
     planCv.style.cursor = state.tool === "copy" ? "copy" : "grab";
-    if (d.moved) saveEdits(d.target.type === "erase");
+    if (d.moved) { delete d.target.auto; saveEdits(d.target.type === "erase"); }
     else if (d.copy) {   // a plain click: put the copy just beside the original so it is visible
       translateEdit(d.target, 12 * cssPx(), 12 * cssPx());
       saveEdits(d.target.type === "erase");
@@ -1684,7 +1769,7 @@ function drawUp() {
   const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
   const min = 4 * cssPx();
   pushUndo();
-  if (d.type === "flip") { flipEdit(d.target); state.selectedEdit = d.target; }
+  if (d.type === "flip") { flipEdit(d.target); delete d.target.auto; state.selectedEdit = d.target; }
   else if (d.type === "erase") curEdits().push({ type: "erase", pts: d.pts, r: d.r });
   else if (len < min) {   // a plain click, no drag: select the item under it (lines included) instead of drawing
     state.undo.pop();
@@ -1697,7 +1782,9 @@ function drawUp() {
   else if (d.type === "stairs") curEdits().push({ type: "stairs", a: [d.start.x, d.start.y], b: [d.end.x, d.end.y] });
   else if (d.type === "thinline") curEdits().push({ type: "line", pts: [[d.start.x, d.start.y], [d.end.x, d.end.y]], thin: true });
   else curEdits().push({ ...previewShape(d), thin: $("#shapesThin").checked });  // toilet / rect / circle / fixtures
-  if (d.type !== "erase") state.selectedEdit = curEdits()[curEdits().length - 1];   // the new item is selected: move / resize it right away
+  // a new shape is selected so it can be moved / resized right away. Not a new line: walls are drawn in chains, and a
+  // selected line's endpoint handle would turn the next stroke from that endpoint into a resize. A flip keeps its target.
+  if (!["erase", "flip", "line", "thinline"].includes(d.type)) state.selectedEdit = curEdits()[curEdits().length - 1];
   saveEdits(d.type === "erase");
 }
 
@@ -2030,7 +2117,7 @@ function drawPlan() {
   if (state.mode === "moves" || state.mode === "route") drawMoves(ctx, u);
   if (state.mode === "route") {
     for (const ev of bendableMoves()) {
-      for (const q of ev.via || []) {
+      for (const q of ev.b.via || []) {   // bends live on the point the leg goes INTO (leg.b), not on the leg
         ctx.fillStyle = "#fff";
         ctx.strokeStyle = "#2563eb";
         ctx.lineWidth = 2.5 * u;
@@ -2224,7 +2311,9 @@ function drawTimeline() {
 }
 
 function timelineTime(e) {
-  const r = timeline.getBoundingClientRect();
+  // the canvas is drawn over the content box (clientWidth), so the border must not count
+  const b = timeline.getBoundingClientRect();
+  const r = { left: b.left + timeline.clientLeft, width: timeline.clientWidth || b.width };
   return { t: Math.max(0, Math.min(state.proj.video.duration, ((e.clientX - r.left) / r.width) * state.proj.video.duration)), r };
 }
 
@@ -2234,12 +2323,12 @@ function nearest(list, t, r, px = 7) {
 }
 
 timeline.addEventListener("pointerdown", (e) => {
-  if (!state.proj) return;
+  if (!state.proj || e.button !== 0) return;
   const { t, r } = timelineTime(e);
   const mp = nearest(movePoints(), t, r);
   if (mp) {
     timeline.setPointerCapture(e.pointerId);
-    state.tlDrag = { mp, moved: false };
+    state.tlDrag = { mp, moved: false, x0: e.clientX };
     setActive(mp.pt, mp.field);
     return;
   }
@@ -2252,6 +2341,7 @@ timeline.addEventListener("pointermove", (e) => {
   const { t, r } = timelineTime(e);
   const d = state.tlDrag;
   if (d) {
+    if (!d.moved && Math.abs(e.clientX - d.x0) < 4) return;   // a click on a mark only selects it; a hand tremor must not retime it
     d.moved = true;
     d.mp.pt[d.mp.field] = +t.toFixed(2);
     drawPlan();
@@ -2265,7 +2355,7 @@ timeline.addEventListener("pointermove", (e) => {
   const win = state.proj.floors.flatMap((f) => floorShows(f)
     .map((w) => `${f.label} 도면 ${w.start != null ? fmtTime(w.start) : "처음"} ~ ${w.end != null ? fmtTime(w.end) : "끝"}`)).join(" · ");
   timeline.style.cursor = mp ? "ew-resize" : "pointer";
-  timeline.title = mp ? `${ptName(mp.pt)} ${FIELD_LABEL[mp.field]} ${fmtTime(mp.t)} (드래그로 조정)`
+  timeline.title = mp ? `${ptName(mp.pt)} ${fieldLabel(mp.pt, mp.field)} ${fmtTime(mp.t)} (드래그로 조정)`
     : sug ? `${fmtTime(sug.t)} · AI 추천: ${sug.reason}`
     : mv ? `${mv.kind === "fade" ? "순간이동" : "이동"} ${fmtTime(mv.start)} → ${fmtTime(mv.end)} (${(mv.end - mv.start).toFixed(1)}초)`
     : win ? `${fmtTime(t)} · ${win}` : fmtTime(t);
@@ -2277,6 +2367,11 @@ timeline.addEventListener("pointerup", () => {
   if (!d) return;
   if (d.moved) saveRoomsMoves();
   else video.currentTime = d.mp.t;
+});
+timeline.addEventListener("pointercancel", () => {   // touch / pen drag taken over by the browser: end it, keep what was moved
+  const d = state.tlDrag;
+  state.tlDrag = null;
+  if (d?.moved) saveRoomsMoves();
 });
 
 // ---------------- transport / sync ----------------
@@ -2332,9 +2427,9 @@ function tick() {
   drawTimeline();
   const now = video.currentTime;
   const key = state.track?.moves?.find((m) => m.end > m.start && now >= m.start && now <= m.end)?.id || "";
-  if (key !== lastMoveKey) {
+  if (key !== lastMoveKey && !$("#mvTable").contains(document.activeElement)) {   // don't pull a time box out from under the typist
     lastMoveKey = key;
-    if (!$("#mvTable").contains(document.activeElement)) renderMoves();   // don't pull a time box out from under the typist
+    renderMoves();
   }
 }
 
@@ -2416,10 +2511,12 @@ video.addEventListener("loadeddata", resizeAll);
 $("#analyzeBtn").addEventListener("click", async () => {
   const btn = $("#analyzeBtn"), msg = $("#analyzeMsg");
   btn.disabled = true;
+  const pid = state.proj.id;
   try {
-    const { job } = await api(`/api/projects/${state.proj.id}/analyze`, { method: "POST" });
+    const { job } = await api(`/api/projects/${pid}/analyze`, { method: "POST" });
     await pollJob(job, (j) => (msg.textContent = `분석 중… ${Math.round(j.progress * 100)}%`));
-    state.analysis = await api(`/api/projects/${state.proj.id}/analysis`);
+    if (state.proj?.id !== pid) return;   // the user left this project meanwhile
+    state.analysis = await api(`/api/projects/${pid}/analysis`);
     msg.textContent = `완료: 추천 시점 ${state.analysis.suggestions.length}개 (타임라인 주황색)`;
     drawTimeline();
   } catch (err) {
@@ -2436,12 +2533,14 @@ $("#renderBtn").addEventListener("click", async () => {
   btn.disabled = true;
   prog.classList.remove("hidden");
   prog.value = 0;
+  const pid = state.proj.id;
   try {
     await flushSaves();
-    const { job } = await api(`/api/projects/${state.proj.id}/render`, { method: "POST", body: JSON.stringify({ outputs }) });
+    const { job } = await api(`/api/projects/${pid}/render`, { method: "POST", body: JSON.stringify({ outputs }) });
     const done = await pollJob(job, (j) => { prog.value = j.progress; msg.textContent = j.message || "렌더링 중…"; });
+    if (state.proj?.id !== pid) return;   // the user left this project meanwhile
     msg.textContent = "완료!";
-    const proj = await api(`/api/projects/${state.proj.id}`);
+    const proj = await api(`/api/projects/${pid}`);
     renderDownloads(proj.outputs, done.result.files);
   } catch (err) {
     msg.textContent = "실패: " + err.message;
@@ -2488,7 +2587,8 @@ function fmtSize(b) {
   return b >= 1e9 ? `${(b / 1e9).toFixed(1)}GB` : `${Math.max(1, Math.round((b || 0) / 1e6))}MB`;
 }
 function fmtTime(t) {
-  const m = Math.floor(t / 60), s = t - m * 60;
+  const r = Math.round(t * 100) / 100;   // round first, so 59.996 becomes 1:00.00 rather than 0:60.00
+  const m = Math.floor(r / 60), s = r - m * 60;
   return `${m}:${s.toFixed(2).padStart(5, "0")}`;
 }
 function escapeHtml(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
