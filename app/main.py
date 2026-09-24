@@ -115,6 +115,7 @@ def public_project(pid: str) -> dict:
     d = pdir(pid)
     proj["id"] = pid
     proj.setdefault("moves", [])
+    proj.setdefault("start", None)
     proj["settings"] = merged_settings(proj.get("settings"))
     proj["default_title"] = f"{proj.get('name', '')} mini map".strip()
     proj["has_preview"] = (d / "preview.mp4").exists()
@@ -259,6 +260,7 @@ class ProjectUpdate(BaseModel):
     floors: list[dict] | None = None     # labels, order and drawing edits are editable here
     rooms: list[dict] | None = None
     moves: list[dict] | None = None      # "③ 이동 지점": start/end points with their own times, bends, mode
+    start: dict | None = None            # "초기 위치" {floor, x, y}; {} clears it
     settings: dict | None = None
 
 
@@ -328,6 +330,14 @@ def update_project(pid: str, body: ProjectUpdate):
         proj["rooms"] = rooms
     if body.moves is not None:
         proj["moves"] = clean_moves(body.moves, floor_ids)
+    if body.start is not None:
+        try:
+            proj["start"] = ({"floor": body.start["floor"], "x": round(float(body.start["x"]), 1), "y": round(float(body.start["y"]), 1)}
+                             if body.start.get("floor") in floor_ids else None)
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "잘못된 초기 위치입니다")
+    if proj.get("start") and proj["start"]["floor"] not in floor_ids:
+        proj["start"] = None
     proj["moves"] = [m for m in proj.get("moves", [])
                      if m["a"]["floor"] in floor_ids and (m.get("b") is None or m["b"]["floor"] in floor_ids)]
     if body.settings is not None:
@@ -441,6 +451,8 @@ def delete_floor(pid: str, fid: str):
     proj["rooms"] = [r for r in proj["rooms"] if r["id"] not in gone]
     proj["moves"] = [m for m in proj.get("moves", [])
                      if m["a"]["floor"] != fid and (m.get("b") is None or m["b"]["floor"] != fid)]
+    if proj.get("start") and proj["start"]["floor"] == fid:
+        proj["start"] = None
     (d / fl["file"]).unlink(missing_ok=True)
     save_project(pid, proj)
     return public_project(pid)
@@ -482,7 +494,7 @@ def get_track(pid: str, fps: float = 30.0):
     times = np.arange(0, proj["video"]["duration"] + 1 / fps, 1 / fps)
     fids = [f["id"] for f in proj["floors"]]
     windows = show_windows(proj["floors"])
-    tr = compute_track(proj.get("moves"), fids, times, s, windows)
+    tr = compute_track(proj.get("moves"), fids, times, s, windows, proj.get("start"))
     if tr is None:
         # no records: no marker, but floors with a show window still come and go
         tr = plan_only_track(times, windows, s)
@@ -521,13 +533,13 @@ def render(pid: str, body: RenderRequest):
     outputs = [o for o in body.outputs if o in ("composite", "overlay", "minimap")]
     if not outputs:
         raise HTTPException(400, "출력 형식을 선택해주세요")
-    if any(o in outputs for o in ("composite", "overlay")) and not proj.get("moves"):
-        raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 출발·도착 지점을 먼저 찍어주세요")
+    if any(o in outputs for o in ("composite", "overlay")) and not proj.get("moves") and not proj.get("start"):
+        raise HTTPException(400, "이동 지점이 없습니다. ③ 이동 지점에서 출발·도착 지점이나 초기 위치를 먼저 찍어주세요")
 
     def run(update):
         files = render_outputs(
             d / proj["video"]["file"], floors_for_render(d, proj), proj["rooms"], proj.get("moves", []),
-            proj.get("settings", {}), title_of(proj), d / "outputs", outputs, update,
+            proj.get("settings", {}), title_of(proj), d / "outputs", outputs, update, start=proj.get("start"),
         )
         return {"files": files}
 

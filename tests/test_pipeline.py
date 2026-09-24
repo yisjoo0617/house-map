@@ -341,3 +341,18 @@ def test_upload_runs_auto_detection_and_redetect_api(sample):
     edits = r.json()["floors"][0]["edits"]
     assert {e["type"] for e in edits if e.get("auto")} == {"door"} and edits[-1] == {"type": "rect", "a": [1.0, 1.0], "b": [5.0, 5.0]}
     client.delete(f"/api/projects/{pid}")
+
+
+def test_initial_position_marker():
+    start = {"floor": "f1", "x": 100, "y": 100}
+    # only an initial position, no moves: the marker just sits there
+    tr = compute_track([], ["f1", "f2"], np.array([0.0, 5.0]), {}, start=start)
+    assert tr["x"].tolist() == [100, 100] and tr["floor"].tolist() == [0, 0] and tr["moves"] == []
+    # with a move that starts elsewhere: rests at the initial position, fades over just before t0, then walks
+    mv = [MV({"floor": "f1", "x": 300, "y": 100}, "b", 4.0, 6.0)]
+    planned = plan_moves(mv, ["f1", "f2"], {"fade_sec": 0.5}, start)
+    assert [(m["kind"], m.get("hop", False), m["start"], m["end"]) for m in planned] == [("fade", True, 3.5, 4.0), ("walk", False, 4.0, 6.0)]
+    tr = compute_track(mv, ["f1", "f2"], np.array([1.0]), {}, start=start)
+    assert tr["x"][0] == 100
+    # an initial position on a floor that no longer exists is ignored
+    assert compute_track([], ["f2"], np.array([0.0]), {}, start=start) is None

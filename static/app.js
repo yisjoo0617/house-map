@@ -10,6 +10,8 @@ const state = {
   rooms: [],
   moves: [],          // "③ 이동 지점": [{id, a: {floor,x,y}, b: {floor,x,y}|null, t0, t1}]
   activePt: null,     // the selected start/end point: {id, end: "a"|"b"} (⏺ 현재 writes into it)
+  start: null,        // "초기 위치" {floor, x, y}: where the marker is before the first move (null = first move's start point)
+  placingStart: false,
   track: null,
   analysis: null,
   planImgs: {},       // floor id -> Image (original plan, for editing)
@@ -274,6 +276,7 @@ function applyProject(proj) {
   state.proj = proj;
   state.rooms = proj.rooms.map((r) => ({ ...r }));
   state.moves = (proj.moves || []).map((m) => ({ ...m, a: { ...m.a }, b: m.b ? { ...m.b } : null }));
+  state.start = proj.start ? { ...proj.start } : null;
   if (!state.viewFloor || !floorOf(state.viewFloor)) state.viewFloor = proj.floors[0].id;
   $("#titleInput").placeholder = proj.default_title;
   renderFloorTabs();
@@ -531,7 +534,7 @@ function saveRoomsMoves() {
 
 async function doSave() {
   saveTimer = null;
-  await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, moves: state.moves }) });
+  await api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ rooms: state.rooms, moves: state.moves, start: state.start || {} }) });
   await Promise.all([refreshTrack(), refreshMinimap()]);
 }
 
@@ -638,7 +641,7 @@ function updatePlanHint() {
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
-        ? "○ 출발 · ● 도착 · 빈 곳 클릭 = 지점 추가 · 지점 클릭 = 선택(⏺ 현재로 시각 기록) · 지점 Shift+클릭 = 거기서 새 이동 출발 · 드래그 = 옮기기 · 더블클릭 = 그 시각으로 · 우클릭/Del = 이동 삭제 · 이전 이동이 끝난 자리와 출발 지점이 다르면 출발 시각에 스르르 옮겨갑니다"
+        ? "○ 출발 · ● 도착 · ⌂ 초기 위치 · 빈 곳 클릭 = 지점 추가 · 지점 클릭 = 선택(⏺ 현재로 시각 기록, 시간 칸 표시) · 지점 Shift+클릭 = 거기서 새 이동 출발 · 드래그 = 옮기기 · 더블클릭 = 그 시각으로 · 우클릭/Del = 삭제 · 마커가 있던 자리와 출발 지점이 다르면 출발 직전에 스르르 옮겨갑니다"
         : "빈 곳 클릭 = 그 자리에 방 이름 표시 (선이 없는 깨끗한 곳을 고르세요) · 드래그 = 위치 수정 · 우클릭 = 삭제 · 마커 이동은 ③ 이동 지점에서";
 }
 
@@ -706,6 +709,13 @@ planCv.addEventListener("pointerdown", (e) => {
   if (state.mode === "draw") return drawDown(e);
   const p = planPoint(e);
   if (state.mode === "moves") {
+    if (state.placingStart) { placeStart(p); return; }
+    if (hitStart(p)) {   // the initial-position marker: drag to move it
+      planCv.setPointerCapture(e.pointerId);
+      state.drag = { startMk: true, start: p, moved: false };
+      setActivePt(null, null);
+      return;
+    }
     const h = hitMovePoint(p);
     const pending = state.moves.find((m) => !m.b);
     // a click on a point selects it (and drags it) - except that while a move waits for its end point the
@@ -783,7 +793,10 @@ planCv.addEventListener("pointermove", (e) => {
   if (state.mode === "draw") return drawMove(e);
   const d = state.drag;
   if (!d) {
-    if (state.mode === "moves" && viewImg()) planCv.style.cursor = hitMovePoint(planPoint(e)) ? "grab" : "crosshair";
+    if (state.mode === "moves" && viewImg()) {
+      const q = planPoint(e);
+      planCv.style.cursor = state.placingStart ? "copy" : hitMovePoint(q) || hitStart(q) ? "grab" : "crosshair";
+    }
     return;
   }
   const p = planPoint(e);
@@ -791,6 +804,7 @@ planCv.addEventListener("pointermove", (e) => {
   d.moved = true;
   if (d.via != null) d.ev.via[d.via] = [+p.x.toFixed(1), +p.y.toFixed(1)];
   else if (d.mv) { const q = d.mv[d.end]; q.x = +p.x.toFixed(1); q.y = +p.y.toFixed(1); }
+  else if (d.startMk) { state.start.x = +p.x.toFixed(1); state.start.y = +p.y.toFixed(1); }
   else { d.room.x = p.x; d.room.y = p.y; }
   drawPlan();
 });
@@ -818,7 +832,9 @@ planCv.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   if (state.mode === "draw") return;
   if (state.mode === "moves") {
-    const h = hitMovePoint(planPoint(e));
+    const q = planPoint(e);
+    if (hitStart(q)) { clearStart(); return; }
+    const h = hitMovePoint(q);
     if (h) deleteMove(h.mv);
     return;
   }
@@ -865,8 +881,48 @@ function setActivePt(mv, end) {
   drawTimeline();
 }
 
+// ---- "초기 위치": one optional marker per project; the marker rests there until the first move ----
+
+function hitStart(p) {
+  const s = state.start;
+  return !!s && s.floor === state.viewFloor && Math.hypot(s.x - p.x, s.y - p.y) < 13 * cssPx();
+}
+
+function placeStart(p) {
+  const pos = snapMovePoint(p);
+  state.start = pos;
+  state.placingStart = false;
+  planCv.style.cursor = "crosshair";
+  saveRoomsMoves();
+  flash("초기 위치 지정 · 첫 이동 전까지 마커가 여기 있습니다");
+}
+
+function clearStart() {
+  if (!state.start) return;
+  state.start = null;
+  saveRoomsMoves();
+  flash("초기 위치 삭제 (첫 이동의 출발 지점에서 시작)");
+}
+
+function startInfoText() {
+  const s = state.start;
+  if (!s) return "초기 위치 없음 (첫 이동의 출발 지점에서 시작)";
+  return `초기 위치: ${escapeHtml(floorOf(s.floor)?.label || "")}${s.floor !== state.viewFloor ? " (다른 층)" : ""}`;
+}
+
+$("#startPlaceBtn").addEventListener("click", () => {
+  state.placingStart = !state.placingStart;
+  $("#startPlaceBtn").classList.toggle("active", state.placingStart);
+  planCv.style.cursor = state.placingStart ? "copy" : "crosshair";
+  if (state.placingStart) flash("도면에서 초기 위치를 클릭하세요 (방 점을 클릭하면 그 위치)");
+});
+$("#startClearBtn").addEventListener("click", clearStart);
+
 function refreshActiveMarks() {
   const ap = activePoint();
+  $("#startInfo").innerHTML = startInfoText();
+  $("#startClearBtn").classList.toggle("hidden", !state.start);
+  $("#startPlaceBtn").classList.toggle("active", state.placingStart);
   for (const tr of $$("#mvTable tbody tr[data-mv]")) tr.classList.toggle("active", tr.dataset.mv === state.activePt?.id);
   for (const inp of $$("[data-mv-time]")) {
     const [id, end] = inp.dataset.mvTime.split(":");
@@ -969,6 +1025,8 @@ function moveInfo(mv) {
 
 function renderMoves() {
   $("#mvCount").textContent = state.moves.length ? `${state.moves.length}개` : "";
+  $("#startInfo").innerHTML = startInfoText();
+  $("#startClearBtn").classList.toggle("hidden", !state.start);
   const now = video.currentTime;
   const fl = (q) => escapeHtml(floorOf(q?.floor)?.label || "");
   const box = (mv, end) => {
@@ -1051,10 +1109,8 @@ function syncPointLabels() {
   if (state.mode !== "moves" || !viewImg()) { if (box.childElementCount) box.innerHTML = ""; return; }
   const k = planCv.getBoundingClientRect().width / viewImg().width;
   const want = new Map();
-  for (const mv of state.moves) for (const end of ["a", "b"]) {
-    const q = mv[end];
-    if (q && q.floor === state.viewFloor) want.set(`${mv.id}:${end}`, { mv, end, q });
-  }
+  const ap = activePoint();   // only the selected point shows its time box; the others stay clean
+  if (ap && ap.mv[ap.end].floor === state.viewFloor) want.set(`${ap.mv.id}:${ap.end}`, { mv: ap.mv, end: ap.end, q: ap.mv[ap.end] });
   for (const el of [...box.children]) if (!want.has(el.dataset.pt)) el.remove();
   for (const [key, { mv, end, q }] of want) {
     let el = box.querySelector(`[data-pt="${key}"]`);
@@ -1082,6 +1138,25 @@ function syncPointLabels() {
 // start / end points and the leg between them, on the floor being viewed
 function drawMoves(ctx, u) {
   const fid = state.viewFloor;
+  const s = state.start;
+  if (s && s.floor === fid) {   // the initial position: green ring with a house glyph
+    ctx.save();
+    ctx.lineWidth = 2.5 * u;
+    ctx.strokeStyle = "#16a34a";
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(s.x, s.y, 10 * u, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#16a34a";
+    ctx.font = `bold ${12 * u}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("⌂", s.x, s.y + 0.5 * u);
+    ctx.font = `bold ${10 * u}px sans-serif`;
+    ctx.lineWidth = 3 * u;
+    ctx.strokeStyle = "rgba(255,255,255,.9)";
+    ctx.strokeText("초기 위치", s.x, s.y - 17 * u);
+    ctx.fillText("초기 위치", s.x, s.y - 17 * u);
+    ctx.restore();
+  }
   state.moves.forEach((mv, i) => {
     const a = mv.a.floor === fid ? mv.a : null, b = mv.b?.floor === fid ? mv.b : null;
     if (!a && !b) return;
@@ -1184,6 +1259,7 @@ function setMode(mode) {
   $("#drawBar").classList.toggle("hidden", mode !== "draw");
   $("#routeBar").classList.toggle("hidden", mode !== "route");
   $("#moveBar").classList.toggle("hidden", mode !== "moves");
+  state.placingStart = false;
   if (mode === "moves") refreshActiveMarks();
   $("#routeUndoBtn").disabled = !state.routeUndo.length;
   updatePlanHint();

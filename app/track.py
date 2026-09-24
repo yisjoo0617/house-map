@@ -62,20 +62,34 @@ def clean_moves(moves: list[dict] | None, floor_ids: list[str]) -> list[dict]:
     return out
 
 
-def initial_pose(moves: list[dict] | None, floor_ids: list[str]) -> dict | None:
-    """Where the marker is before anything happens: the first move's start point."""
+def clean_start(start: dict | None, floor_ids: list[str]) -> dict | None:
+    """The optional initial position ("초기 위치"), if it is on a known floor."""
+    if not start or start.get("floor") not in floor_ids:
+        return None
+    try:
+        return _pos(start)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def initial_pose(moves: list[dict] | None, floor_ids: list[str], start: dict | None = None) -> dict | None:
+    """Where the marker is before anything happens: the initial position if one is set, else the first move's start point."""
+    first = clean_start(start, floor_ids)
+    if first:
+        return first
     clean = clean_moves(moves, floor_ids)
     return clean[0]["a"] if clean else None
 
 
-def plan_moves(moves: list[dict] | None, floor_ids: list[str], settings: dict | None = None) -> list[dict]:
+def plan_moves(moves: list[dict] | None, floor_ids: list[str], settings: dict | None = None,
+               start: dict | None = None) -> list[dict]:
     """Each move as {id, t, start, end, from, to, poly, kind}; a fade-over to a start point the marker is not
-    at yet is an extra {kind: fade, hop: True} entry just before it."""
+    at yet (including from the initial position) is an extra {kind: fade, hop: True} entry just before it."""
     settings = settings or {}
     fade = float(settings.get("fade_sec", 0.6))
     out = []
     prev_end = -np.inf
-    cur = None   # where the marker is after the moves planned so far
+    cur = clean_start(start, floor_ids)   # where the marker is after the moves planned so far
     for m in clean_moves(moves, floor_ids):
         a, b = m["a"], m["b"]
         if cur is None:
@@ -102,13 +116,15 @@ def compute_track(
     times: np.ndarray,
     settings: dict | None = None,
     windows: list[tuple[float | None, float | None]] | None = None,   # per floor: (show start, show end)
+    start: dict | None = None,                                         # "초기 위치": where the marker is before the first move
 ) -> dict | None:
-    """Per-time floor index, x, y, marker opacity and panel opacity (or None if there is no complete move)."""
+    """Per-time floor index, x, y, marker opacity and panel opacity (or None if there is neither a complete move
+    nor an initial position)."""
     settings = settings or {}
-    first = initial_pose(moves, floor_ids)
+    first = initial_pose(moves, floor_ids, start)
     if first is None:
         return None
-    planned = plan_moves(moves, floor_ids, settings)
+    planned = plan_moves(moves, floor_ids, settings, start)
     times = np.asarray(times, dtype=float)
     fidx = {f: i for i, f in enumerate(floor_ids)}
 

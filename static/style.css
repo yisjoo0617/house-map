@@ -196,3 +196,5 @@ kbd { display: inline-block; padding: 1px 6px; font: 12px/1.4 ui-monospace, mono
 #mvTable td:first-child a { font-weight: 700; text-decoration: none; }
 #moveSel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one fixed line: the plan must not jump when the selection text changes */
 #moveSel b { color: #ea580c; }
+#startPlaceBtn.active { background: #16a34a; border-color: #16a34a; color: #fff; }
+#startInfo { color: #16a34a; font-weight: 600; }

@@ -806,6 +806,7 @@ def render_outputs(
     out_dir: Path,
     outputs: list[str],
     progress: Callable[[float, str], None] | None = None,
+    start: dict | None = None,  # "초기 위치": where the marker is before the first move
 ) -> list[str]:
     settings = merged_settings(settings)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -834,7 +835,7 @@ def render_outputs(
 
     fps, total, W, H = probe(video_path)
     times = np.arange(total) / fps
-    track = compute_track(moves, [f["id"] for f in floors], times, settings, show_windows(floors))
+    track = compute_track(moves, [f["id"] for f in floors], times, settings, show_windows(floors), start)
     if track is None:
         from .track import plan_only_track
         track = plan_only_track(times, show_windows(floors), settings)   # windows only, no marker
