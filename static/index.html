@@ -309,8 +309,7 @@
         <label>위치<select data-setting="corner">
           <option value="br">우측 하단</option><option value="bl">좌측 하단</option>
           <option value="tr">우측 상단</option><option value="tl">좌측 상단</option></select></label>
-        <label>크기 <input type="range" min="0.12" max="0.6" step="0.01" data-setting="size" /></label>
-        <label>최대 높이 <input type="range" min="0.2" max="0.95" step="0.01" data-setting="max_height" /></label>
+        <label title="미니맵 크기. 오른쪽 끝 = 미니맵이 영상 높이에 닿는 가장 큰 크기">크기 <input type="range" min="0.12" max="1" step="0.01" data-setting="size" /></label>
         <label>화면 가장자리 여백 <input type="range" min="0" max="0.1" step="0.005" data-setting="margin" /></label>
         <label>전체 불투명도 <input type="range" min="0.3" max="1" step="0.01" data-setting="opacity" /></label>
       </div>
@@ -334,6 +333,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=48"></script>
+<script src="/static/app.js?v=50"></script>
 </body>
 </html>

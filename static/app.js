@@ -275,6 +275,7 @@ async function openProject(id) {
   state.drag = null;
   clipStop = null;
   lastMoveKey = "";
+  markerFloor = null;
   applyProject(proj);
   state.analysis = proj.has_analysis ? await api(`/api/projects/${id}/analysis`) : null;
   $("#listView").classList.add("hidden");
@@ -432,7 +433,7 @@ $("#floorTabs").addEventListener("click", async (e) => {
   const b = e.target.closest("button");
   if (!b) return;
   if (b.dataset.floor) {
-    video.pause();   // while playing the editor follows the marker's floor; a manual pick stops that
+    video.pause();   // a manual pick pauses; after that the editor only follows the marker when it changes floor
     state.viewFloor = b.dataset.floor;
     renderFloorTabs();
     resizePlan();
@@ -504,6 +505,15 @@ function syncSettingLabels() {
   $("#panelFadeVal").textContent = `${(+s.panel_fade_sec).toFixed(1)}초`;
 }
 
+// the 크기 slider ends where the panel reaches the video height (bigger values would change nothing), so every
+// position of the slider is a visible size. A saved value above that shows at the end of the slider.
+function fitSizeSlider(cap) {
+  const el = $('[data-setting="size"]');
+  if (!el || !cap) return;
+  el.max = String(Math.max(+el.min + 0.01, Math.ceil(cap * 100) / 100));
+  el.value = String(Math.min(+state.proj.settings.size, +el.max));
+}
+
 function fillSettings(s) {
   for (const el of $$("[data-setting]")) {
     const v = s[el.dataset.setting];
@@ -558,6 +568,7 @@ async function refreshMinimap() {
   m.marker.layers = { shadow, glow, body };
   m.marker.canvas = document.createElement("canvas");
   state.mini = m;
+  fitSizeSlider(m.size_cap);
   drawOverlay();
 }
 
@@ -2437,14 +2448,20 @@ function stepFrame(n) {
 }
 
 let lastMoveKey = "";
+// While playing, the plan editor follows the marker only when the marker itself changes floor. A floor the user
+// picked stays on screen when play starts, and nothing switches while a shape or point is being dragged.
+let markerFloor = null;   // the marker's floor at the last tick while playing (null = not playing)
 function followFloor() {
-  // the plan editor follows the floor you are on while playing
   const pose = poseAt(video.currentTime);
   const fid = pose && state.proj.floors[pose.floor]?.id;
-  if (fid && fid !== state.viewFloor && !video.paused) {
+  if (video.paused || !fid) { markerFloor = video.paused ? null : markerFloor; return; }
+  const moved = markerFloor !== null && fid !== markerFloor;   // the marker went to another floor just now
+  markerFloor = fid;
+  if (moved && fid !== state.viewFloor && !state.drawing && !state.drag) {
     state.viewFloor = fid;
     renderFloorTabs();
     resizePlan();
+    if (state.mode === "draw") loadStruct();
   }
 }
 

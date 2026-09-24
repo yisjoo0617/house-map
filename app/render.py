@@ -29,7 +29,7 @@ DEFAULT_SETTINGS = {
     # placement
     "corner": "br",            # br | bl | tr | tl
     "size": 0.3,               # panel max width, fraction of video width
-    "max_height": 0.5,         # panel max height, fraction of video height
+    "max_height": 1.0,         # panel max height, fraction of video height: always the whole height (크기 alone sets the size)
     "margin": 0.025,           # fraction of min(video w, h)
     "opacity": 1.0,
     # look
@@ -76,9 +76,15 @@ def auto_kinds(settings: dict) -> tuple[str, ...]:
     return tuple(k for k in ("walls", "thin", "doors", "stairs") if settings.get(f"auto_{k}", True))
 
 
+LABEL_BASELINE = 0.89   # floor label / title baseline, as a fraction of the header row height
+LABEL_DROP = 0.04       # the label then sits this much (fraction of the header row) lower, into the plan's top margin:
+                        # bigger = closer to the plan (too big and letters like g / y touch the top wall)
+
+
 def merged_settings(s: dict | None) -> dict:
     out = dict(DEFAULT_SETTINGS)
     out.update({k: v for k, v in (s or {}).items() if k in DEFAULT_SETTINGS})
+    out["max_height"] = 1.0   # no longer a setting: older projects / presets that kept a lower cap must not shrink the panel
     return out
 
 
@@ -524,19 +530,59 @@ class Minimap:
 
         def layout(wp: float) -> dict:
             pad = 0.05 * wp
-            title_h = 0.11 * wp * label_scale if show_title else 0
+            title_h = 0.10 * wp * label_scale if show_title else 0   # header row: just the label's height, so it sits close to the plan
             note_h = 0.07 * wp if show_note else 0
             plan_w = wp - 2 * pad
             plan_h = plan_w * ratio
+            # the plan box starts right at the label's baseline: the letters' descenders sit in the plan's own
+            # empty margin (auto_crop), so there is no blank strip between the floor name and the plan
+            head = title_h * LABEL_BASELINE
             return {"wp": wp, "pad": pad, "title_h": title_h, "note_h": note_h, "plan_w": plan_w, "plan_h": plan_h,
-                    "hp": 2 * pad + title_h + plan_h + note_h}
+                    "head": head, "hp": 2 * pad + head + plan_h + note_h}
 
+        self.hw = layout(1.0)["hp"]   # panel height per unit of width (the layout is linear in the width)
         L = layout(max_w)
         if L["hp"] > max_h:
             L = layout(max_w * max_h / L["hp"])
         self.w, self.h = int(round(L["wp"])), int(round(L["hp"]))
         W, H = self.w, self.h
-        pad, box_y = L["pad"], L["pad"] + L["title_h"]
+        pad, box_y = L["pad"], L["pad"] + L["head"]
+
+        line_px = 0.0065 * L["wp"] * float(s["line_width"])
+        fit = [min(L["plan_w"] / w, L["plan_h"] / h) for w, h in sizes]
+        if s["same_scale"]:
+            fit = [min(fit)] * len(plans)
+
+        # pass 1: where each floor's plan goes and how far its drawn lines reach
+        floors = []
+        for plan, sc, crop, floor_edits in zip(plans, fit, crops, edits):
+            cw, ch = crop[2] - crop[0], crop[3] - crop[1]
+            iw, ih = max(1, int(round(cw * sc))), max(1, int(round(ch * sc)))
+            ox = int(round((W - iw) / 2))
+            oy = int(round(box_y + (L["plan_h"] - ih) * 0.2))   # spare height goes mostly below: keeps the plan close to its label
+            sa, x_ink, y_ink = None, (0, iw), (0, ih)
+            if chalk:
+                sa = structure_alpha(plan, s, floor_edits, crop, iw, ih, line_px)
+                # centre what is actually drawn, not the crop box: the crop can be lopsided (a plan touching one
+                # side of its image, detected raster that is not drawn), which left unequal left / right margins
+                cols = np.flatnonzero(sa.max(axis=0) > 0.05)
+                rows = np.flatnonzero(sa.max(axis=1) > 0.05)
+                if cols.size:
+                    x_ink, y_ink = (int(cols[0]), int(cols[-1]) + 1), (int(rows[0]), int(rows[-1]) + 1)
+                    ox += int(round(((W - (ox + x_ink[1])) - (ox + x_ink[0])) / 2))
+            floors.append({"crop": crop, "sc": sc, "iw": iw, "ih": ih, "ox": ox, "oy": oy, "sa": sa, "x_ink": x_ink, "y_ink": y_ink})
+
+        # the board hugs the drawing: the side margins and the bottom margin are made equal by trimming whichever
+        # is larger (the plan keeps its size). Every floor shares one board, so the biggest drawing decides.
+        if floors:
+            right_gap = min(W - (f["ox"] + f["x_ink"][1]) for f in floors)
+            bottom_gap = min(H - int(round(L["note_h"])) - (f["oy"] + f["y_ink"][1]) for f in floors)
+            gap = max(1, min(right_gap, bottom_gap))
+            cut_x, cut_y = max(0, right_gap - gap), max(0, bottom_gap - gap)
+            W, H = max(1, W - 2 * cut_x), max(1, H - cut_y)
+            for f in floors:
+                f["ox"] -= cut_x
+            self.w, self.h = W, H
 
         # board background: panel colour with a soft diagonal vignette on the chalkboard look
         col = np.array(hex_bgr(s["panel_color"]), np.float32)
@@ -556,15 +602,10 @@ class Minimap:
         self.alphas: list[np.ndarray] = []
         self.fits: list[tuple[float, float, float]] = []  # (ox, oy, scale) plan px -> panel px
         self._make_marker(L["wp"])
-        fit = [min(L["plan_w"] / w, L["plan_h"] / h) for w, h in sizes]
-        if s["same_scale"]:
-            fit = [min(fit)] * len(plans)
-        line_px = 0.0065 * L["wp"] * float(s["line_width"])
-        for plan, label, sc, floor_rooms, crop, floor_edits in zip(plans, labels, fit, rooms, crops, edits):
+        # pass 2: draw each floor on the (trimmed) board
+        for plan, label, floor_rooms, f in zip(plans, labels, rooms, floors):
+            crop, sc, iw, ih, ox, oy, sa = f["crop"], f["sc"], f["iw"], f["ih"], f["ox"], f["oy"], f["sa"]
             cw, ch = crop[2] - crop[0], crop[3] - crop[1]
-            iw, ih = max(1, int(round(cw * sc))), max(1, int(round(ch * sc)))
-            ox = int(round((W - iw) / 2))
-            oy = int(round(box_y + (L["plan_h"] - ih) * 0.2))   # spare height goes mostly below: keeps the plan close to its label
             # (ox, oy) is where the crop's corner lands; fits map *plan* coordinates
             fit_xy = (ox - crop[0] * sc, oy - crop[1] * sc, sc)
             self.fits.append(fit_xy)
@@ -575,16 +616,21 @@ class Minimap:
             alpha = mask * float(s["panel_opacity"])
             content = np.zeros((H, W), np.float32)
             if chalk:
-                content[oy : oy + ih, ox : ox + iw] = structure_alpha(plan, s, floor_edits, crop, iw, ih, line_px)
+                # centring / trimming may push the blank crop margin past the board edge: paste what still fits
+                a0, a1 = max(0, ox), min(W, ox + iw)
+                b0, b1 = max(0, oy), min(H, oy + ih)
+                content[b0:b1, a0:a1] = sa[b0 - oy : b1 - oy, a0 - ox : a1 - ox]
             else:
                 x0, y0 = int(crop[0]), int(crop[1])
                 src = plan[y0 : y0 + int(ch), x0 : x0 + int(cw)]
-                img[oy : oy + ih, ox : ox + iw] = cv2.resize(src, (iw, ih), interpolation=cv2.INTER_AREA)
+                a0, a1 = max(0, ox), min(W, ox + iw)
+                b0, b1 = max(0, oy), min(H, oy + ih)
+                img[b0:b1, a0:a1] = cv2.resize(src, (iw, ih), interpolation=cv2.INTER_AREA)[b0 - oy : b1 - oy, a0 - ox : a1 - ox]
                 alpha = alpha.copy()
-                alpha[oy : oy + ih, ox : ox + iw] = mask[oy : oy + ih, ox : ox + iw]
+                alpha[b0:b1, a0:a1] = mask[b0:b1, a0:a1]
 
-            # header text lines up with the right edge of this floor's plan (not the board's padding)
-            text_a = self._text_layer(W, H, L, title, label if s["show_floor_label"] else "", show_title, show_note, ox + iw)
+            # header text ends exactly at this floor's right wall line (not the crop box, which has a margin)
+            text_a = self._text_layer(W, H, L, title, label if s["show_floor_label"] else "", show_title, show_note, ox + f["x_ink"][1])
             if s["show_room_names"]:
                 self._room_names(text_a, floor_rooms, fit_xy, L, (oy, oy + ih))
             content = np.maximum(content, text_a) * noise
@@ -612,7 +658,7 @@ class Minimap:
             f_title = _font(self.s, 0.075 * L["wp"])
             f_label = _font(self.s, 0.105 * L["wp"] * float(self.s["floor_label_size"]))
             fb_title = _font(self.s, 0.06 * L["wp"], "gothic")
-            base_y = pad + L["title_h"] * 0.86  # text baseline, close above the plan
+            base_y = pad + L["title_h"] * (LABEL_BASELINE + LABEL_DROP)  # just below the top of the plan box
             x = W - pad if right is None else min(W - pad, float(right))
             if label:
                 x -= d.textlength(label, font=f_label)
@@ -782,6 +828,8 @@ def build_preview(plans, labels, settings, title, frame_w, frame_h, rooms=None, 
     return {
         "frame": [frame_w, frame_h],
         "x0": mm.x0, "y0": mm.y0, "w": mm.w, "h": mm.h,
+        # the 크기 at which the panel reaches the video height: past it the panel cannot grow, so the slider ends there
+        "size_cap": round(min(1.0, frame_h * float(settings["max_height"]) / (mm.hw * frame_w)), 3),
         "floors": [{"ox": ox, "oy": oy, "scale": sc, "image": _png_data_url(mm.rgba(i))} for i, (ox, oy, sc) in enumerate(mm.fits)],
         "marker": {"half": mm.m_half, "glow": bool(settings["glow"]),
                    "pulse": {"period": PULSE_PERIOD, "min": PULSE_MIN, "steps": PULSE_STEPS},
