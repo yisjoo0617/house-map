@@ -47,14 +47,13 @@ echo.
 echo Python을 찾을 수 없습니다.
 echo https://www.python.org/downloads/ 에서 Python 3.12 이상을 설치하세요.
 echo 설치 첫 화면에서 "Add python.exe to PATH"를 꼭 체크한 뒤 이 파일을 다시 실행하세요.
-if exist .venv rmdir /s /q .venv
 pause
 goto :eof
 
 :fail
 echo.
 echo 설치 중 오류가 발생했습니다. 위 메시지를 캡처해서 보내주세요.
-if exist .venv rmdir /s /q .venv
+echo 다시 실행하면 설치를 이어서 시도합니다. 계속 실패하면 .venv 폴더를 지운 뒤 다시 실행하세요.
 pause
 goto :eof
 
