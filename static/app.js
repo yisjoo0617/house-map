@@ -634,7 +634,7 @@ $("#routeUndoBtn").addEventListener("click", undoRoute);
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭으로 선택한 도형은 Del로 삭제 · 뒤집기는 ⇄ 도구 · 선은 Ctrl+드래그로 옮기고 Shift+드래그로 크기 조절(Ctrl+클릭 = 선택) · Ctrl+Shift+드래그 = 복사해서 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭 = 선택 (Del 삭제 · Ctrl+C 복사 · Ctrl+V 마우스 위치에 붙여넣기) · 뒤집기는 ⇄ 도구 · 선은 Ctrl+드래그로 옮기고 Shift+드래그로 크기 조절 · Ctrl+Shift+드래그 = 복사해서 옮기기"
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
@@ -811,6 +811,8 @@ planCv.addEventListener("dblclick", (e) => {
   const t = h && ptTime(h.mv, h.end);
   if (t != null) { video.pause(); video.currentTime = t; }
 });
+
+planCv.addEventListener("pointerleave", () => { state.hover = null; if (state.mode === "draw" && !state.drawing) drawPlan(); });
 
 planCv.addEventListener("contextmenu", (e) => {
   e.preventDefault();
@@ -1324,7 +1326,7 @@ function translateEdit(e, dx, dy) {
 
 function moveCursor(e, p) {
   if (state.drawing) return;
-  const over = p && hitEdit(p, null, true);
+  const over = p && hitEdit(p, SHAPE_TYPES, true);
   if (p && resizeGesture(e)) {   // resize: a handle under the pointer, or the nearest handle of the shape under it
     planCv.style.cursor = hitHandle(p) || hitEdit(p, SHAPE_TYPES, true) ? "nwse-resize" : "crosshair";
     return;
@@ -1358,6 +1360,36 @@ function deleteSelectedEdit() {
   state.selectedEdit = null;
   saveEdits(e.type === "erase");
   flash("도형 삭제 · Ctrl+Z로 되돌리기");
+}
+
+// Ctrl+C keeps a copy of the selected item; Ctrl+V puts it under the pointer (or beside the original)
+function copySelectedEdit() {
+  const e = state.selectedEdit;
+  if (!e || !curEdits().includes(e)) { flash("먼저 도형을 클릭해서 선택하세요"); return; }
+  state.clipboard = JSON.stringify(e);
+  state.pasteCount = 0;
+  flash("복사됨 · Ctrl+V로 붙여넣기 (마우스 위치에)");
+}
+
+function editCenter(e) {
+  const pts = editSegments(e).flat();
+  const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+  return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+}
+
+function pasteEdit() {
+  if (!state.clipboard) { flash("복사한 도형이 없습니다 (도형 선택 후 Ctrl+C)"); return; }
+  const c = JSON.parse(state.clipboard);
+  delete c.auto;   // a paste counts as hand-drawn even when the original was automatic
+  const at = state.hover;
+  const ctr = editCenter(c);
+  if (at) translateEdit(c, at.x - ctr.x, at.y - ctr.y);
+  else { const k = 12 * cssPx() * ++state.pasteCount; translateEdit(c, k, k); }
+  pushUndo();
+  curEdits().push(c);
+  state.selectedEdit = c;
+  saveEdits();
+  flash(at ? "붙여넣기" : "붙여넣기 (원본 옆에)");
 }
 
 // {e, h} for a handle under the pointer, {e} for a shape body, or null
@@ -1477,7 +1509,7 @@ function drawDown(e) {
   const t = state.tool;
   state.selectedEdit = null;   // set again below when the press lands on a shape
   if (e.ctrlKey || e.metaKey) {   // Ctrl+drag moves, Ctrl+Shift+drag drags a copy
-    const hit = hitEdit(p, null, true);
+    const hit = hitEdit(p, SHAPE_TYPES, true);   // never an eraser stroke: those are invisible outside the delete tool
     if (hit) startMove(p, hit, e.shiftKey);
     return;
   }
@@ -1487,7 +1519,7 @@ function drawDown(e) {
     if (t === "resize") return;   // Shift over empty space with another tool: draw as usual
   }
   if (t === "copy") {
-    const hit = hitEdit(p, null, true);
+    const hit = hitEdit(p, SHAPE_TYPES, true);
     if (hit) startMove(p, hit, true);
     return;
   }
@@ -1562,9 +1594,14 @@ function drawUp() {
   const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
   const min = 4 * cssPx();
   pushUndo();
-  if (d.type === "flip") flipEdit(d.target);
+  if (d.type === "flip") { flipEdit(d.target); state.selectedEdit = d.target; }
   else if (d.type === "erase") curEdits().push({ type: "erase", pts: d.pts, r: d.r });
-  else if (len < min) { state.undo.pop(); drawPlan(); return; }
+  else if (len < min) {   // a plain click, no drag: select the item under it (lines included) instead of drawing
+    state.undo.pop();
+    state.selectedEdit = hitEdit(d.start0 || d.start, SHAPE_TYPES, true);
+    drawPlan();
+    return;
+  }
   else if (d.type === "line") curEdits().push({ type: "line", pts: [[d.start.x, d.start.y], [d.end.x, d.end.y]] });
   else if (d.type === "door") curEdits().push({ type: "door", hinge: [d.start.x, d.start.y], end: [d.end.x, d.end.y], flip: false });
   else if (d.type === "stairs") curEdits().push({ type: "stairs", a: [d.start.x, d.start.y], b: [d.end.x, d.end.y] });
@@ -2219,7 +2256,7 @@ function loop() {
 }
 
 const TOOL_KEYS = { KeyL: "line", KeyT: "thinline", KeyD: "door", KeyS: "stairs", KeyB: "toilet", KeyR: "rect", KeyC: "circle",
-  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyV: "copy", KeyA: "resize", KeyE: "erase", KeyX: "delete" };
+  KeyW: "basin", KeyK: "sink", KeyI: "induction", KeyO: "closet", KeyF: "flip", KeyA: "resize", KeyE: "erase", KeyX: "delete" };
 
 for (const ev of ["keydown", "keyup"]) document.addEventListener(ev, (e) => {
   if (e.key === "Shift") state.shiftDown = e.shiftKey;
@@ -2233,6 +2270,8 @@ document.addEventListener("keydown", (e) => {
   if (!state.proj || typing || document.querySelector("dialog[open]")) return;
   if (state.mode === "draw") {
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") { e.preventDefault(); undoEdit(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.code === "KeyC") { e.preventDefault(); copySelectedEdit(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") { e.preventDefault(); pasteEdit(); return; }
     if (TOOL_KEYS[e.code] && !e.ctrlKey && !e.metaKey) { setTool(TOOL_KEYS[e.code]); return; }
     if (e.code === "BracketLeft" || e.code === "BracketRight") {   // [ / ] = smaller / bigger eraser
       const inp = $("#eraseSize");
