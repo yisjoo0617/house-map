@@ -170,4 +170,4 @@ python3 -m venv .venv
 ```
 
 ## 폰트 라이선스
-`static/fonts/`의 나눔펜(Nanum Pen Script)과 나눔고딕은 SIL Open Font License 1.1을 따릅니다. 영상에 사용하거나 재배포할 수 있습니다.
+`static/fonts/`의 나눔펜(Nanum Pen Script), 나눔고딕, 본고딕(Source Han Sans KR Normal, Adobe)은 모두 SIL Open Font License 1.1을 따릅니다. 영상에 사용하거나 재배포할 수 있습니다.

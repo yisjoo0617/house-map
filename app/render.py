@@ -19,7 +19,7 @@ from .track import compute_track
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 FONT_DIR = Path(__file__).resolve().parent.parent / "static" / "fonts"
-FONTS = {"pen": "NanumPenScript-Regular.ttf", "gothic": "NanumGothic-Bold.ttf"}
+FONTS = {"pen": "NanumPenScript-Regular.ttf", "gothic": "NanumGothic-Bold.ttf", "sourcehan": "SourceHanSansKR-Normal.otf"}
 
 DEFAULT_NOTE = "※ 이해를 돕기위한 미니맵 입니다. 실제와 다를 수 있습니다."
 
@@ -43,10 +43,11 @@ DEFAULT_SETTINGS = {
     "auto_crop": True,         # fit the minimap to the drawn structure (drops captions like "A-2 (1st Floor)")
     "panel_ratio": 0.8,        # plan area height / width, fixed so every overlay has the same frame; 0 = follow the plan
     "same_scale": True,        # multi-floor projects: draw every floor at the same scale
-    "font": "pen",             # pen | gothic
+    "font": "pen",             # pen | gothic | sourcehan
     "title": "",               # empty -> "<project name> mini map"
     "show_title": False,       # "<name> mini map" text next to the floor label
     "show_floor_label": True,  # "1F" at the top
+    "floor_label_size": 1.0,   # scale of the "1F" text (the header row grows with it)
     "note": DEFAULT_NOTE,
     "show_note": False,        # disclaimer line at the bottom
     "show_room_names": True,
@@ -508,10 +509,12 @@ class Minimap:
         show_title = bool(title or (s["show_floor_label"] and any(labels)))
         show_note = bool(s["show_note"] and s["note"])
         ratio = float(s["panel_ratio"]) or max(h / w for w, h in sizes)
+        # a bigger floor label needs a taller header row so it never runs into the plan
+        label_scale = max(1.0, float(s["floor_label_size"])) if s["show_floor_label"] and any(labels) else 1.0
 
         def layout(wp: float) -> dict:
             pad = 0.05 * wp
-            title_h = 0.11 * wp if show_title else 0
+            title_h = 0.11 * wp * label_scale if show_title else 0
             note_h = 0.07 * wp if show_note else 0
             plan_w = wp - 2 * pad
             plan_h = plan_w * ratio
@@ -597,7 +600,7 @@ class Minimap:
         pad = L["pad"]
         if show_title:
             f_title = _font(self.s, 0.075 * L["wp"])
-            f_label = _font(self.s, 0.105 * L["wp"])
+            f_label = _font(self.s, 0.105 * L["wp"] * float(self.s["floor_label_size"]))
             fb_title = _font(self.s, 0.06 * L["wp"], "gothic")
             base_y = pad + L["title_h"] * 0.86  # text baseline, close above the plan
             x = W - pad if right is None else min(W - pad, float(right))

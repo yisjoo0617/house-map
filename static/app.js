@@ -307,6 +307,7 @@ function loadImage(src) {
 function renderFloorTabs() {
   const tabs = state.proj.floors.map((f) =>
     `<button data-floor="${f.id}" class="${f.id === state.viewFloor ? "active" : ""}" title="더블클릭하여 이름 변경">${escapeHtml(f.label)}</button>`);
+  tabs.push(`<button id="renameFloorBtn" title="선택한 층의 이름을 바꿉니다 (미니맵 상단의 1F 글자). 층 탭을 더블클릭해도 됩니다">✎ 이름 변경</button>`);
   tabs.push(`<button id="addFloorBtn" title="도면 이미지 추가">+ 층 추가</button>`);
   if (state.proj.floors.length > 1) tabs.push(`<button class="del" id="delFloorBtn">이 층 삭제</button>`);
   $("#floorTabs").innerHTML = tabs.join("");
@@ -410,6 +411,7 @@ $("#floorTabs").addEventListener("click", async (e) => {
     drawPlan();
     if (state.mode === "draw") loadStruct();
   }
+  else if (b.id === "renameFloorBtn") renameFloor(state.viewFloor);
   else if (b.id === "addFloorBtn") $("#addFloorFile").click();
   else if (b.id === "delFloorBtn") {
     const f = floorOf(state.viewFloor);
@@ -423,16 +425,20 @@ $("#floorTabs").addEventListener("click", async (e) => {
   }
 });
 
-$("#floorTabs").addEventListener("dblclick", (e) => {
-  const b = e.target.closest("[data-floor]");
-  if (!b) return;
-  const f = floorOf(b.dataset.floor);
-  const label = prompt("층 이름", f.label);
-  if (!label) return;
+function renameFloor(fid) {
+  const f = floorOf(fid);
+  if (!f) return;
+  const label = prompt("층 이름 (미니맵 상단에 표시됩니다)", f.label);
+  if (label == null || !label.trim()) return;
   f.label = label.trim();
   renderFloorTabs();
   renderRooms();
   api(`/api/projects/${state.proj.id}`, { method: "PUT", body: JSON.stringify({ floors: state.proj.floors }) }).then(refreshMinimap);
+}
+
+$("#floorTabs").addEventListener("dblclick", (e) => {
+  const b = e.target.closest("[data-floor]");
+  if (b) renameFloor(b.dataset.floor);
 });
 
 $("#addFloorFile").addEventListener("change", async (e) => {

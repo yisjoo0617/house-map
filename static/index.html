@@ -276,10 +276,11 @@
         <label>스타일<select data-setting="style">
           <option value="chalk">칠판 (도면 선만 분필로)</option><option value="original">원본 도면 그대로</option></select></label>
         <label>글꼴<select data-setting="font">
-          <option value="pen">손글씨 (나눔펜)</option><option value="gothic">고딕</option></select></label>
+          <option value="pen">손글씨 (나눔펜)</option><option value="gothic">고딕 (나눔고딕)</option><option value="sourcehan">본고딕 (Source Han Sans KR Normal)</option></select></label>
         <label class="wide">제목 <input type="text" data-setting="title" id="titleInput" /></label>
         <label class="chk"><input type="checkbox" data-setting="show_title" /> 제목 표시 ("… mini map")</label>
         <label class="chk"><input type="checkbox" data-setting="show_floor_label" /> 층 이름 표시 (1F)</label>
+        <label>층 이름 크기 <input type="range" min="0.5" max="2" step="0.05" data-setting="floor_label_size" /></label>
         <label class="wide">하단 안내문 <input type="text" data-setting="note" /></label>
         <label class="chk"><input type="checkbox" data-setting="show_note" /> 하단 안내문 표시</label>
         <label class="chk"><input type="checkbox" data-setting="chalk_texture" /> 분필 질감</label>
