@@ -634,7 +634,7 @@ $("#routeUndoBtn").addEventListener("click", undoRoute);
 
 function updatePlanHint() {
   $("#planHint").textContent = state.mode === "draw"
-    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 뒤집기는 ⇄ 도구 · 선은 Ctrl+드래그로 옮기고 Shift+드래그로 크기 조절 · Ctrl+Shift+드래그 = 복사해서 옮기기"
+    ? "빨간 선 = 자동으로 인식된 벽·문·계단 · 파란 선 = 직접 그린 것 · 도형(문·계단·변기·설비·사각형·원)은 드래그로 옮기고 끝점·모서리를 끌어 크기 조절 · 클릭으로 선택한 도형은 Del로 삭제 · 뒤집기는 ⇄ 도구 · 선은 Ctrl+드래그로 옮기고 Shift+드래그로 크기 조절(Ctrl+클릭 = 선택) · Ctrl+Shift+드래그 = 복사해서 옮기기"
     : state.mode === "route"
       ? "파란 선 = ③에서 정한 이동 경로 · 선 근처 클릭 = 그 자리에 꺾는 점 추가 · 점 드래그 = 옮기기 · 점 우클릭 = 삭제 · 이동 지점 표의 초기화 = 바로 직선으로 · Ctrl+Z = 되돌리기"
       : state.mode === "moves"
@@ -1343,6 +1343,23 @@ function moveCursor(e, p) {
 const MANIP_TYPES = ["door", "stairs", "toilet", "rect", "circle", "basin", "sink", "induction", "closet"];
 const manipTool = () => !["erase", "flip", "copy", "delete", "resize"].includes(state.tool);
 
+// the selected drawn item (a plain click on a shape, or Ctrl+click on anything): Del removes it
+function selectEdit(e) {
+  state.selectedEdit = e || null;
+  drawPlan();
+}
+
+function deleteSelectedEdit() {
+  const e = state.selectedEdit;
+  const list = e && curEdits();
+  if (!list || !list.includes(e)) { state.selectedEdit = null; flash("먼저 도형을 클릭해서 선택하세요"); return; }
+  pushUndo();
+  list.splice(list.indexOf(e), 1);
+  state.selectedEdit = null;
+  saveEdits(e.type === "erase");
+  flash("도형 삭제 · Ctrl+Z로 되돌리기");
+}
+
 // {e, h} for a handle under the pointer, {e} for a shape body, or null
 function manipTarget(p) {
   const hh = hitHandle(p, undefined, MANIP_TYPES);
@@ -1458,6 +1475,7 @@ function drawDown(e) {
   const p = planPoint(e);
   planCv.setPointerCapture(e.pointerId);
   const t = state.tool;
+  state.selectedEdit = null;   // set again below when the press lands on a shape
   if (e.ctrlKey || e.metaKey) {   // Ctrl+drag moves, Ctrl+Shift+drag drags a copy
     const hit = hitEdit(p, null, true);
     if (hit) startMove(p, hit, e.shiftKey);
@@ -1524,6 +1542,7 @@ function drawUp() {
   state.drawing = null;
   if (!d) return;
   if (d.type === "resize") {
+    state.selectedEdit = d.target;
     if (d.moved) saveEdits();
     else { state.undo.pop(); drawPlan(); }
     return;
@@ -1535,7 +1554,9 @@ function drawUp() {
       translateEdit(d.target, 12 * cssPx(), 12 * cssPx());
       saveEdits(d.target.type === "erase");
       flash("복사됨 · Ctrl+드래그로 옮기세요");
-    } else { state.undo.pop(); drawPlan(); }
+    } else { state.undo.pop(); }
+    state.selectedEdit = d.target;   // a plain click selects the shape (Del deletes it); a drag keeps it selected
+    drawPlan();
     return;
   }
   const len = d.start && d.end ? Math.hypot(d.end.x - d.start.x, d.end.y - d.start.y) : 0;
@@ -1790,6 +1811,16 @@ function drawEditsLayer(ctx, u) {
     }
   }
   // resize handles: on the item being resized, or the one under the pointer while the gesture is available
+  const sel = state.selectedEdit;
+  if (sel && curEdits().includes(sel) && !d) {   // the selected item: thicker blue outline + its handles
+    ctx.save();
+    ctx.strokeStyle = "rgba(37, 99, 235, .35)";
+    ctx.lineWidth = 9 * u;
+    ctx.lineCap = ctx.lineJoin = "round";
+    for (const [a, b] of editSegments(sel)) { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+    ctx.restore();
+    if (SHAPE_TYPES.includes(sel.type)) drawHandles(ctx, sel, u);
+  }
   if (d?.type === "resize") drawHandles(ctx, d.target, u, d.handle);
   else if (!d && state.hover && (state.tool === "resize" || state.shiftDown)) {
     const t = resizeTarget(state.hover);
@@ -2211,7 +2242,8 @@ document.addEventListener("keydown", (e) => {
       drawPlan();
       return;
     }
-    if (e.code === "Delete" || e.code === "Backspace") return;
+    if (e.code === "Delete" || e.code === "Backspace") { e.preventDefault(); deleteSelectedEdit(); return; }
+    if (e.code === "Escape") { selectEdit(null); return; }
   } else if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") {   // outside ①: undo route bending (also the 초기화 button)
     e.preventDefault();
     undoRoute();
