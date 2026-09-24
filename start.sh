@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# House-Map launcher for macOS / Linux: installs dependencies on first run, then starts the app.
+# House-Map launcher for macOS / Linux: installs dependencies on first run (and again whenever
+# requirements.txt changes after an update), then starts the app.
 set -e
 cd "$(dirname "$0")"
 
@@ -13,6 +14,11 @@ if [ ! -x .venv/bin/python ]; then
   "$PY" -m venv .venv
   .venv/bin/python -m pip install --upgrade pip
   .venv/bin/python -m pip install -r requirements.txt || { rm -rf .venv; echo "설치 실패"; exit 1; }
+  cp requirements.txt .venv/requirements.installed
+elif ! cmp -s requirements.txt .venv/requirements.installed; then
+  echo "House-Map 업데이트: 바뀐 프로그램을 설치합니다."
+  .venv/bin/python -m pip install -r requirements.txt || { echo "업데이트 설치 실패: 인터넷 연결을 확인한 뒤 다시 실행하세요"; exit 1; }
+  cp requirements.txt .venv/requirements.installed
 fi
 
 exec .venv/bin/python run.py "$@"

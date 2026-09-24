@@ -2,8 +2,15 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-if exist .venv\Scripts\python.exe goto run
+if not exist .venv\Scripts\python.exe goto install
 
+rem 업데이트로 requirements.txt가 바뀌었으면 패키지를 다시 설치한다 (.venv를 지울 필요 없음)
+if not exist .venv\requirements.installed goto reinstall
+fc /b requirements.txt .venv\requirements.installed >nul 2>nul
+if errorlevel 1 goto reinstall
+goto run
+
+:install
 echo ================================================
 echo  House-Map 첫 실행: 필요한 프로그램을 설치합니다.
 echo  인터넷 연결이 필요하고 몇 분 정도 걸립니다.
@@ -18,6 +25,17 @@ if errorlevel 1 goto nopython
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 if errorlevel 1 goto fail
+copy /y requirements.txt .venv\requirements.installed >nul
+goto run
+
+:reinstall
+echo ================================================
+echo  House-Map 업데이트: 바뀐 프로그램을 설치합니다.
+echo  인터넷 연결이 필요하고 잠시 걸립니다.
+echo ================================================
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+if errorlevel 1 goto updatefail
+copy /y requirements.txt .venv\requirements.installed >nul
 
 :run
 .venv\Scripts\python.exe run.py
@@ -37,4 +55,11 @@ goto :eof
 echo.
 echo 설치 중 오류가 발생했습니다. 위 메시지를 캡처해서 보내주세요.
 if exist .venv rmdir /s /q .venv
+pause
+goto :eof
+
+:updatefail
+echo.
+echo 업데이트 설치 중 오류가 발생했습니다. 인터넷 연결을 확인한 뒤 다시 실행하세요.
+echo 계속 실패하면 .venv 폴더를 지우고 다시 실행하면 처음부터 설치합니다. (프로젝트는 data 폴더에 있어 그대로 남습니다)
 pause

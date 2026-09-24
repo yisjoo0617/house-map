@@ -10,6 +10,8 @@
 
 **다른 PC에 줄 zip 만들기**: `.venv/bin/python scripts/make_release.py` → `dist/house-map-날짜.zip` (내 스타일 프리셋 포함, 영상과 프로젝트는 제외)
 
+**업데이트**: 새 zip을 쓰던 폴더에 덮어쓰기로 풀고 `start.bat`을 다시 실행합니다. `data/`(프로젝트·영상·결과물)와 `.venv`는 zip에 없으므로 그대로 남고, `requirements.txt`가 바뀐 업데이트면 `start.bat`/`start.sh`가 패키지를 자동으로 다시 설치합니다. 옛 프로젝트 파일은 열 때 자동 변환됩니다. 자세한 순서는 `설치방법.txt`의 5번에 있습니다.
+
 **개발용 (WSL/Linux)**:
 ```bash
 python3 -m venv .venv
