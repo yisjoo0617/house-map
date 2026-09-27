@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
     "show_title": False,       # "<name> mini map" text next to the floor label
     "show_floor_label": True,  # "1F" at the top
     "floor_label_size": 1.0,   # scale of the "1F" text (the header row grows with it)
+    "floor_label_gap": 0.0,    # extra space between the floor label and the plan, fraction of the panel width (<0 = closer)
     "note": DEFAULT_NOTE,
     "show_note": False,        # disclaimer line at the bottom
     "show_room_names": True,
@@ -537,6 +538,8 @@ class Minimap:
             # the plan box starts right at the label's baseline: the letters' descenders sit in the plan's own
             # empty margin (auto_crop), so there is no blank strip between the floor name and the plan
             head = title_h * LABEL_BASELINE
+            if show_title:   # user-set gap: moves the plan down (or up), the label stays where it is
+                head = max(0.0, head + float(s["floor_label_gap"]) * wp)
             return {"wp": wp, "pad": pad, "title_h": title_h, "note_h": note_h, "plan_w": plan_w, "plan_h": plan_h,
                     "head": head, "hp": 2 * pad + head + plan_h + note_h}
 

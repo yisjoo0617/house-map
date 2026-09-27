@@ -2589,7 +2589,12 @@ $("#renderBtn").addEventListener("click", async () => {
   try {
     await flushSaves();
     const { job } = await api(`/api/projects/${pid}/render`, { method: "POST", body: JSON.stringify({ outputs }) });
-    const done = await pollJob(job, (j) => { prog.value = j.progress; msg.textContent = j.message || "렌더링 중…"; });
+    const eta = etaTracker();
+    const done = await pollJob(job, (j) => {
+      prog.value = j.progress;
+      const left = j.status === "running" ? eta(j.progress) : "";
+      msg.textContent = (j.message || "렌더링 중…") + (left ? ` · 남은 시간 ${left}` : "");
+    });
     if (state.proj?.id !== pid) return;   // the user left this project meanwhile
     msg.textContent = "완료!";
     const proj = await api(`/api/projects/${pid}`);
@@ -2601,6 +2606,21 @@ $("#renderBtn").addEventListener("click", async () => {
     prog.classList.add("hidden");
   }
 });
+
+// remaining time from the progress rate since the job started running ("" until there is enough to go on)
+function etaTracker() {
+  let t0 = null, p0 = 0;
+  return (p) => {
+    const now = performance.now() / 1000;
+    if (t0 === null) { t0 = now; p0 = p; return ""; }
+    const dt = now - t0, dp = p - p0;
+    if (dt < 3 || dp < 0.01 || p >= 1) return "";
+    const sec = Math.round((dt / dp) * (1 - p));
+    if (sec < 60) return `약 ${Math.max(1, sec)}초`;
+    const m = Math.floor(sec / 60), h = Math.floor(m / 60);
+    return h ? `약 ${h}시간 ${m % 60}분` : `약 ${m}분 ${sec % 60}초`;
+  };
+}
 
 function outputLabel(f) {
   if (f === "composite.mp4") return "합성 영상 (mp4)";
