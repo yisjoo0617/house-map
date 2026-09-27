@@ -105,11 +105,11 @@ function renderList() {
 }
 
 function projectCard(p) {
-  const done = p.outputs.includes("overlay.mov");
-  const badge = done ? `<span class="badge ok">오버레이 완료</span>`
+  const done = p.outputs.includes("composite.mp4");
+  const badge = done ? `<span class="badge ok">렌더링 완료</span>`
     : p.moves ? `<span class="badge wip">작업 중</span>` : `<span class="badge">이동 지점 없음</span>`;
   const thumb = p.thumb ? `style="background-image:url('/api/projects/${p.id}/files/${p.thumb}?v=${encodeURIComponent(p.updated)}')"` : "";
-  const dl = done ? `<a class="btn" href="/api/projects/${p.id}/files/outputs/overlay.mov?download=1" title="overlay.mov 다운로드">⬇ 오버레이</a>` : "";
+  const dl = done ? `<a class="btn" href="/api/projects/${p.id}/files/outputs/composite.mp4?download=1" title="composite.mp4 다운로드">⬇ 합성 영상</a>` : "";
   return `
     <article class="pcard" data-id="${p.id}">
       <div class="thumb ${p.thumb?.startsWith("outputs/") ? "dark" : ""}" ${thumb}></div>
@@ -2579,8 +2579,7 @@ $("#analyzeBtn").addEventListener("click", async () => {
 });
 
 $("#renderBtn").addEventListener("click", async () => {
-  const outputs = $$("input[name=out]:checked").map((c) => c.value);
-  if (!outputs.length) return alert("출력 형식을 선택해주세요");
+  const outputs = ["composite"];
   const btn = $("#renderBtn"), prog = $("#renderProg"), msg = $("#renderMsg");
   btn.disabled = true;
   prog.classList.remove("hidden");
@@ -2622,20 +2621,10 @@ function etaTracker() {
   };
 }
 
-function outputLabel(f) {
-  if (f === "composite.mp4") return "합성 영상 (mp4)";
-  if (f === "overlay.mov") return "투명 오버레이 (mov): 편집 영상 위 트랙에 0초 위치로 올려 사용";
-  const m = f.match(/^minimap_(.+)\.png$/);
-  if (m) return `미니맵 이미지 ${m[1]} (png, 칠판 스타일)`;
-  const c = f.match(/^plan_(.+)\.png$/);
-  if (c) return `홍보용 미니 도면 ${c[1]} (png, 흰 배경 선 도면)`;
-  return f;
-}
-
 function renderDownloads(files, fresh = []) {
   const v = Date.now();
-  const items = (files || []).map((f) =>
-    `<li><a href="${fileUrl("outputs/" + f, true)}&v=${v}">⬇ ${escapeHtml(outputLabel(f))}</a>${fresh.includes(f) ? " <b>new</b>" : ""}</li>`);
+  const items = (files || []).filter((f) => f === "composite.mp4").map((f) =>
+    `<li><a href="${fileUrl("outputs/" + f, true)}&v=${v}">⬇ 합성 영상 (mp4)</a>${fresh.includes(f) ? " <b>new</b>" : ""}</li>`);
   if (state.proj) items.push(`<li><a href="${fileUrl("project.json", true)}">⬇ 프로젝트 설정 (json)</a></li>`);
   $("#downloads").innerHTML = items.join("");
 }

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>House-Map 미니맵 생성기</title>
-  <link rel="stylesheet" href="/static/style.css?v=15" />
+  <link rel="stylesheet" href="/static/style.css?v=16" />
 </head>
 <body>
 <header>
@@ -318,14 +318,7 @@
 
     <div class="card">
       <h3>렌더링 & 다운로드</h3>
-      <div class="form-row checks">
-        <label class="chk"><input type="checkbox" name="out" value="overlay" checked /> 투명 오버레이 (mov)</label>
-        <label class="chk"><input type="checkbox" name="out" value="composite" /> 합성 영상 (mp4, 확인용)</label>
-        <label class="chk"><input type="checkbox" name="out" value="minimap" checked /> 도면 이미지 (칠판 미니맵 + 흰 배경 홍보용 도면 png)</label>
-      </div>
-      <div class="form-row"><label>오버레이 코덱</label><select data-setting="overlay_codec">
-        <option value="qtrle">QuickTime Animation (무손실, 2K 10분 약 100MB, 1분 이내)</option>
-        <option value="prores">ProRes 4444 (2K 10분 약 4.5GB, 약 10분 소요)</option></select></div>
+      <p class="muted small">원본 영상에 미니맵을 합성한 영상(mp4)을 만듭니다.</p>
       <button id="renderBtn" class="primary">렌더링 시작</button>
       <progress id="renderProg" max="1" value="0" class="hidden"></progress>
       <span id="renderMsg" class="muted"></span>
@@ -334,6 +327,6 @@
   </div>
 </main>
 
-<script src="/static/app.js?v=53"></script>
+<script src="/static/app.js?v=54"></script>
 </body>
 </html>
