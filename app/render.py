@@ -55,6 +55,8 @@ DEFAULT_SETTINGS = {
     "show_note": False,        # disclaimer line at the bottom
     "show_room_names": True,
     "room_name_size": 1.0,
+    "text_shadow": 0.0,        # drop shadow under the plan lines, room names and floor label (0 = none, 1 = darkest)
+    "text_shadow_dist": 1.0,   # shadow offset / blur, relative to the default
     # marker
     "marker_color": "#ffffff",
     "marker_size": 1.0,
@@ -636,12 +638,26 @@ class Minimap:
             text_a = self._text_layer(W, H, L, title, label if s["show_floor_label"] else "", show_title, show_note, ox + f["x_ink"][1])
             if s["show_room_names"]:
                 self._room_names(text_a, floor_rooms, fit_xy, L, (oy, oy + ih))
-            content = np.maximum(content, text_a) * noise
+            content = np.maximum(content, text_a)
+            if float(s["text_shadow"]) > 0:   # one shadow for everything drawn in the line colour
+                img, alpha = _over(img, alpha, np.zeros(3, np.float32), self._shadow(content, L["wp"]))
+            content = content * noise
             img, alpha = _over(img, alpha, line, content)
             self.bases.append(np.clip(img, 0, 255).astype(np.uint8))
             self.alphas.append((alpha * mask * float(s["opacity"])).astype(np.float32))
 
         self.x0 = self.y0 = 0
+
+    def _shadow(self, content: np.ndarray, wp: float) -> np.ndarray:
+        """Soft drop shadow of `content`: blurred, moved down-right, scaled by 그림자 진하기."""
+        dist = 0.006 * wp * float(self.s["text_shadow_dist"])
+        a = cv2.GaussianBlur(content, (0, 0), max(0.5, dist * 0.8))
+        k = int(round(dist))
+        if k > 0:
+            out = np.zeros_like(a)
+            out[k:, k:] = a[:-k, :-k]
+            a = out
+        return np.clip(a * 1.6 * float(self.s["text_shadow"]), 0, 1).astype(np.float32)
 
     @staticmethod
     def _round_mask(w: int, h: int, r: int) -> np.ndarray:
