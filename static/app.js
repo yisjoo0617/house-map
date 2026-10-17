@@ -1445,61 +1445,6 @@ function saveEdits(erased = false) {
   }, 300);
 }
 
-function snapPoint(p, from, free, skip = null) {
-  // snap to existing endpoints first, then keep lines horizontal / vertical
-  const tol = 9 * cssPx();
-  for (const e of curEdits()) {
-    if (e === skip) continue;
-    const ends = e.type === "line" ? [e.pts[0], e.pts[e.pts.length - 1]] : e.type === "door" ? [e.hinge, e.end] : [];
-    for (const q of ends) if (Math.hypot(q[0] - p.x, q[1] - p.y) < tol) return { x: q[0], y: q[1] };
-  }
-  if (from && !free) {
-    const dx = p.x - from.x, dy = p.y - from.y;
-    const ang = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
-    if (ang < 10 || ang > 170) return { x: p.x, y: from.y };
-    if (Math.abs(ang - 90) < 10) return { x: from.x, y: p.y };
-  }
-  return p;
-}
-
-// crossing point of segments p-q and a-b (a and b as [x, y]), or null when they don't cross
-function segCross(p, q, a, b) {
-  const rx = q.x - p.x, ry = q.y - p.y, sx = b[0] - a[0], sy = b[1] - a[1];
-  const den = rx * sy - ry * sx;
-  if (Math.abs(den) < 1e-9) return null;
-  const t = ((a[0] - p.x) * sy - (a[1] - p.y) * sx) / den;
-  const u = ((a[0] - p.x) * ry - (a[1] - p.y) * rx) / den;
-  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-  return { x: p.x + t * rx, y: p.y + t * ry };
-}
-
-// A line drawn to a wall stops exactly on it: an end that runs a little past the wall (or falls a
-// little short of it) is moved onto the crossing, so nothing pokes out of the plan's outline.
-function clipToWalls(start, end) {
-  const tol = 12 * cssPx();
-  const len = Math.hypot(end.x - start.x, end.y - start.y);
-  if (len < 1e-6) return [start, end];
-  const ux = (end.x - start.x) / len, uy = (end.y - start.y) / len;
-  const walls = curEdits().filter((e) => e.type === "line").flatMap(editSegments);
-  // the plan's outline: an end outside it always comes back to the outer wall it crossed
-  const xs = walls.flatMap(([a, b]) => [a[0], b[0]]), ys = walls.flatMap(([a, b]) => [a[1], b[1]]);
-  const outside = (q) => xs.length && (q.x < Math.min(...xs) || q.x > Math.max(...xs) || q.y < Math.min(...ys) || q.y > Math.max(...ys));
-  const clip = (from, to, dir) => {   // `to` slides along the line onto the nearest wall crossing within tol
-    const far = { x: to.x + dir * ux * tol, y: to.y + dir * uy * tol };
-    let best = null, bd = outside(to) ? Infinity : tol;
-    for (const [a, b] of walls) {
-      const q = segCross(from, far, a, b);
-      if (!q) continue;
-      const d = Math.hypot(q.x - to.x, q.y - to.y);
-      if (d < bd && Math.hypot(q.x - from.x, q.y - from.y) > tol) { bd = d; best = q; }
-    }
-    return best || to;
-  };
-  const e2 = clip(start, end, 1);
-  const s2 = clip(e2, start, -1);
-  return [s2, e2];
-}
-
 // Ctrl (or ⌘) + drag moves any drawn item as a whole
 function translateEdit(e, dx, dy) {
   const mv = (q) => [q[0] + dx, q[1] + dy];
@@ -1618,21 +1563,14 @@ function manipTarget(p) {
 const SHAPE_TYPES = ["line", "door", "stairs", "toilet", "rect", "circle", "basin", "sink", "induction", "closet"];
 const resizeGesture = (e) => state.tool === "resize" || (e.shiftKey && !e.ctrlKey && !e.metaKey);
 
-// handles of a drawn item: [{pt, set(p, alt)}]. The geometry is captured when the handles are made
+// handles of a drawn item: [{pt, set(p)}]. The geometry is captured when the handles are made
 // (at the start of a drag), so a corner dragged past the opposite one simply turns the box inside out.
 function editHandles(e) {
   const H = [];
-  const P = (q) => ({ x: q[0], y: q[1] });
   if (e.type === "line") {
-    e.pts.forEach((q, i) => H.push({ pt: q, set: (p, alt) => {
-      const other = e.pts.length === 2 ? P(e.pts[1 - i]) : null;   // a two-point line stays horizontal / vertical
-      const s = snapPoint(p, other, alt || !other, e);
-      e.pts[i] = [s.x, s.y];
-    } }));
+    e.pts.forEach((q, i) => H.push({ pt: q, set: (p) => { e.pts[i] = [p.x, p.y]; } }));
   } else if (e.type === "door") {
-    for (const [k, other] of [["hinge", "end"], ["end", "hinge"]]) {
-      H.push({ pt: e[k], set: (p, alt) => { const s = snapPoint(p, P(e[other]), alt, e); e[k] = [s.x, s.y]; } });
-    }
+    for (const k of ["hinge", "end"]) H.push({ pt: e[k], set: (p) => { e[k] = [p.x, p.y]; } });
   } else if (e.type === "toilet") {
     for (const k of ["a", "b"]) H.push({ pt: e[k], set: (p) => { e[k] = [p.x, p.y]; } });
   } else if (e.type === "circle") {
@@ -1644,7 +1582,7 @@ function editHandles(e) {
     const box = [Math.min(e.a[0], e.b[0]), Math.min(e.a[1], e.b[1]), Math.max(e.a[0], e.b[0]), Math.max(e.a[1], e.b[1])];
     const setBox = (b) => { e.a = [Math.min(b[0], b[2]), Math.min(b[1], b[3])]; e.b = [Math.max(b[0], b[2]), Math.max(b[1], b[3])]; };
     for (const [ix, iy] of [[0, 1], [2, 1], [2, 3], [0, 3]]) {   // corners
-      H.push({ pt: [box[ix], box[iy]], set: (p) => { const s = snapPoint(p, null, true, e); const b = [...box]; b[ix] = s.x; b[iy] = s.y; setBox(b); } });
+      H.push({ pt: [box[ix], box[iy]], set: (p) => { const b = [...box]; b[ix] = p.x; b[iy] = p.y; setBox(b); } });
     }
     for (const [i, pt] of [[1, [(box[0] + box[2]) / 2, box[1]]], [2, [box[2], (box[1] + box[3]) / 2]],
                            [3, [(box[0] + box[2]) / 2, box[3]]], [0, [box[0], (box[1] + box[3]) / 2]]]) {   // sides
@@ -1751,10 +1689,9 @@ function drawDown(e) {
     if (hit) state.drawing = { type: "flip", target: hit, start: p };
     return;
   }
-  const s = t === "erase" ? p : snapPoint(p, null, e.altKey);
   const r = (+$("#eraseSize").value) * cssPx();
-  state.drawing = t === "erase" ? { type: "erase", pts: [[s.x, s.y]], r }
-    : { type: t, start: s, end: s, start0: s };
+  state.drawing = t === "erase" ? { type: "erase", pts: [[p.x, p.y]], r }
+    : { type: t, start: p, end: p };
   drawPlan();
 }
 
@@ -1764,7 +1701,7 @@ function drawMove(e) {
   state.hover = p;
   if (!d) { moveCursor(e, p); if (state.tool === "erase" || resizeGesture(e) || manipTool()) drawPlan(); return; }
   if (d.type === "resize") {
-    d.handle.set(p, e.altKey);
+    d.handle.set(p);
     d.moved = true;
     drawPlan();
     return;
@@ -1780,7 +1717,6 @@ function drawMove(e) {
     const q = d.pts[d.pts.length - 1];
     if (Math.hypot(p.x - q[0], p.y - q[1]) >= Math.max(1, d.r / 3)) d.pts.push([p.x, p.y]);   // the stroke is 2r wide: closer points change nothing
   }
-  else if (d.type === "line" || d.type === "thinline") [d.start, d.end] = clipToWalls(d.start0, snapPoint(p, d.start0, e.altKey));
   else if (d.type !== "flip") d.end = p;
   drawPlan();
 }
@@ -1814,7 +1750,7 @@ function drawUp() {
   else if (d.type === "erase") curEdits().push({ type: "erase", pts: d.pts, r: d.r });
   else if (len < min) {   // a plain click, no drag: select the item under it (lines included) instead of drawing
     state.undo.pop();
-    state.selectedEdit = hitEdit(d.start0 || d.start, SHAPE_TYPES, true);
+    state.selectedEdit = hitEdit(d.start, SHAPE_TYPES, true);
     drawPlan();
     return;
   }
